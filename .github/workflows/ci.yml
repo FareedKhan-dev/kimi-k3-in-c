@@ -26,7 +26,7 @@ jobs:
         os: [ubuntu-latest, ubuntu-22.04]
         cc: [gcc, clang]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install toolchain
         run: |
@@ -67,7 +67,7 @@ jobs:
     name: warnings as errors
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libomp-dev
       - name: Build with -Werror
         run: make portable CFLAGS="-O2 -std=gnu99 -Wall -Wextra -Wpointer-arith -Wshadow -Wvla -Wno-unused-parameter -Werror -fopenmp -ffp-contract=off" -j"$(nproc)"
@@ -76,7 +76,7 @@ jobs:
     name: ASan + UBSan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libomp-dev
       # test_cache and test_st are the two that matter most here. SECURITY.md puts the
       # safetensors parser and the streaming cache in scope precisely because they read
@@ -106,7 +106,7 @@ jobs:
     name: tokenizer parity
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
@@ -140,7 +140,7 @@ jobs:
     name: python tools lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
@@ -155,7 +155,7 @@ jobs:
     name: shellcheck
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends shellcheck
       # benchmarks/ is included deliberately. Its scripts run unattended for hours and
       # record whatever they observe as a result, so a quoting or pipefail defect there
