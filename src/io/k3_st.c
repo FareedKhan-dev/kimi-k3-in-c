@@ -14,6 +14,7 @@
  *   this engine has been.
  */
 #define _GNU_SOURCE            /* O_DIRECT */
+#define _DARWIN_C_SOURCE       /* F_NOCACHE on macOS */
 #define _POSIX_C_SOURCE 200809L
 #define _FILE_OFFSET_BITS 64
 
@@ -341,7 +342,15 @@ static int scan_shard(K3St *s, Build *b, int shard, const char *path)
     /* A second descriptor on the same file, for streamed expert reads that must not go
      * through the page cache. Optional: if the filesystem refuses O_DIRECT the reader
      * falls back to fd[]. */
+#ifdef __APPLE__
+    /* macOS has no O_DIRECT; F_NOCACHE gives the same "skip page cache" hint. */
+    if (s->dfd) {
+        s->dfd[shard] = open(path, O_RDONLY);
+        if (s->dfd[shard] >= 0) fcntl(s->dfd[shard], F_NOCACHE, 1);
+    }
+#else
     if (s->dfd) s->dfd[shard] = open(path, O_RDONLY | O_DIRECT);
+#endif
     return ntensor;
 bad:
     free(json);
