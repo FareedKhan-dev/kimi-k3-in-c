@@ -1,5 +1,6 @@
 /* k3_trunk.c - see k3_trunk.h for why the trunk is streamed rather than quantised. */
 #define _GNU_SOURCE            /* O_DIRECT */
+#define _DARWIN_C_SOURCE       /* F_NOCACHE, F_RDADVISE on macOS */
 #define _POSIX_C_SOURCE 200809L
 #define _FILE_OFFSET_BITS 64
 
@@ -136,11 +137,18 @@ int k3_trunk_open(K3Trunk *tr, const char *dir, const K3Cfg *c, int64_t budget_b
      * to 4096 and the slots come from posix_memalign. If the filesystem refuses
      * O_DIRECT, fall back rather than fail: correctness does not depend on it. */
     tr->direct = 1;
+#ifdef __APPLE__
+    /* No O_DIRECT on macOS. F_NOCACHE is the equivalent hint: reads bypass the
+     * unified buffer cache, which is the property the ring slot depends on. */
+    tr->fd = open(p, O_RDONLY);
+    if (tr->fd >= 0 && fcntl(tr->fd, F_NOCACHE, 1) < 0) tr->direct = 0;
+#else
     tr->fd = open(p, O_RDONLY | O_DIRECT);
     if (tr->fd < 0) {
         tr->direct = 0;
         tr->fd = open(p, O_RDONLY);
     }
+#endif
     if (tr->fd < 0) { fprintf(stderr, "k3_trunk: cannot open %s\n", p); return -1; }
     {
         jval *a = json_get(root, "align");
@@ -393,8 +401,18 @@ void k3_trunk_prefetch(K3Trunk *tr, int L)
      * concurrent writer to the slot the kernels are reading, and that is a race worth
      * paying for with a test rather than guessing at. */
     if (tr->direct) return;
+#ifdef __APPLE__
+    /* macOS has no posix_fadvise. F_RDADVISE issues the same read-ahead hint. */
+    {
+        struct radvisory ra;
+        ra.ra_offset = (off_t)tr->lay[L].file_off;
+        ra.ra_count  = (int)tr->lay[L].nbytes;
+        fcntl(tr->fd, F_RDADVISE, &ra);
+    }
+#else
     posix_fadvise(tr->fd, (off_t)tr->lay[L].file_off, (off_t)tr->lay[L].nbytes,
                   POSIX_FADV_WILLNEED);
+#endif
 }
 
 void k3_trunk_report(const K3Trunk *tr, const char *label)

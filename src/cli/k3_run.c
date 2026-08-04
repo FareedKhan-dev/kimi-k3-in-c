@@ -38,6 +38,7 @@
  *   keep correct and the copy is the one that goes stale.
  */
 #define _POSIX_C_SOURCE 200809L
+#define _DARWIN_C_SOURCE       /* struct rusage fields on macOS */
 
 #include <math.h>
 #include <stdio.h>
@@ -217,7 +218,12 @@ static double peak_rss_bytes(void)
 {
     struct rusage ru;
     if (getrusage(RUSAGE_SELF, &ru) != 0) return 0.0;
+#ifdef __APPLE__
+    /* Darwin reports ru_maxrss in bytes, not kilobytes. */
+    return (double)ru.ru_maxrss;
+#else
     return (double)ru.ru_maxrss * 1024.0;
+#endif
 }
 
 /* MemAvailable, which is what the kernel thinks can actually be handed out, not
