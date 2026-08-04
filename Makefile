@@ -33,6 +33,21 @@ WARN     := -Wall -Wextra -Wpointer-arith -Wshadow -Wvla -Wno-unused-parameter
 CFLAGS   ?= -O3 -std=gnu99 $(WARN) $(ARCH) -fopenmp -ffp-contract=off
 LDFLAGS  ?= -lm -fopenmp
 
+# Apple clang has no -fopenmp driver flag. If Homebrew's libomp is installed, pass the
+# flag through to the frontend and link libomp explicitly; the code itself is
+# arch-clean, so this is all macOS needs.
+ifeq ($(shell uname -s),Darwin)
+LIBOMP := $(shell brew --prefix libomp 2>/dev/null)
+ifneq ($(LIBOMP),)
+CFLAGS  := $(filter-out -fopenmp,$(CFLAGS)) -Xclang -fopenmp -I$(LIBOMP)/include
+LDFLAGS := $(filter-out -fopenmp,$(LDFLAGS)) -L$(LIBOMP)/lib -lomp
+else
+$(warning libomp not found; building without OpenMP (brew install libomp for parallel kernels))
+CFLAGS  := $(filter-out -fopenmp,$(CFLAGS))
+LDFLAGS := $(filter-out -fopenmp,$(LDFLAGS))
+endif
+endif
+
 # Flat include search across the module dirs: sources use "k3.h", "k3_cache.h" etc
 # rather than path-qualified includes, which keeps them relocatable.
 INCLUDES := -Iinclude -Iinclude/k3 -Ithird_party \
