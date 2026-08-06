@@ -430,6 +430,7 @@ int main(int argc, char **argv)
     double cache_gb = 64.0, trunk_gb = 16.0;
     int budget_auto = 0;
     int spec_n = 0;
+    int tf_check = 0;
     const char *preset_name = NULL;
     int incremental = 0;
     for (int i = 2; i < argc; i++) {
@@ -444,6 +445,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--out") && i + 1 < argc) outp = argv[++i];
         else if (!strcmp(argv[i], "--trunk") && i + 1 < argc) trunk_dir = argv[++i];
         else if (!strcmp(argv[i], "--spec") && i + 1 < argc) spec_n = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--tf-check")) tf_check = 1;
         else if (!strcmp(argv[i], "--trunk-gb") && i + 1 < argc) {
             const char *v = argv[++i];
             if (!strcmp(v, "auto")) budget_auto = 1;
@@ -907,6 +909,40 @@ int main(int argc, char **argv)
             printf("speculative decode: up to %d drafted tokens per sweep, n-gram lookup, "
                    "verified batched\n\n", spec_n);
         }
+    }
+
+    /* --tf-check: teacher-forced agreement over the whole --ids sequence in ONE sweep.
+     * Prediction i is the argmax after positions 0..i; it is compared to the id the
+     * sequence actually continues with. This is the acceptance rate a draft model
+     * would see under batched greedy verification, measured directly, and it is the
+     * one number a quantized-draft design stands on. Free-running comparisons cannot
+     * measure it: a single early divergence changes every later context. */
+    if (tf_check) {
+        if (np < 2) { fprintf(stderr, "--tf-check needs at least 2 ids\n"); return 2; }
+        int *arg = (int *)malloc((size_t)np * sizeof(int));
+        if (!arg) { fprintf(stderr, "OOM for --tf-check\n"); return 1; }
+        const double t0c = now_s();
+        if (forward(&w, &c, &cache, seq, np, lg, sc, h, br, ks, arg) != 0) {
+            fprintf(stderr, "forward failed in --tf-check\n");
+            return 1;
+        }
+        int match = 0;
+        for (int i = 0; i + 1 < np; i++) match += (arg[i] == seq[i + 1]);
+        printf("teacher-forced agreement: %d/%d positions (%.1f%%) in %.1f s\n",
+               match, np - 1, 100.0 * match / (np - 1), now_s() - t0c);
+        printf("  per-position (p=predicted a=actual): ");
+        for (int i = 0; i + 1 < np; i++)
+            if (arg[i] != seq[i + 1])
+                printf("[%d p=%d a=%d] ", i, arg[i], seq[i + 1]);
+        printf("\n");
+        FILE *tf = fopen(outp, "w");
+        if (tf) {
+            fprintf(tf, "{\"tf_positions\":%d,\"tf_matches\":%d,\"tf_agreement\":%.4f}\n",
+                    np - 1, match, (double)match / (np - 1));
+            fclose(tf);
+        }
+        free(arg);
+        return 0;
     }
 
     printf("%-6s %-10s %-12s %-10s %-10s %s\n",
