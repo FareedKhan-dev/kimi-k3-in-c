@@ -459,10 +459,33 @@ int main(int argc, char **argv)
         }
         const double trunk_full = 111.0;   /* full packed trunk + widen headroom */
         if (usable - cache_min >= trunk_full) {
+            /* Full residency: per-token trunk reads disappear entirely. This is the
+             * configuration auto exists for. */
             trunk_gb = trunk_full;
             cache_gb = usable - trunk_full;
         } else {
+            /* Partial pinning has WEAK returns and real hazards, both measured on the
+             * released checkpoint: pinning 51 of 109 GB ran 14% SLOWER than pinning
+             * nothing (48.2 vs 42.1 s/token) because peak RSS at ~90% of RAM put the
+             * kernel into reclaim and the device served the remaining tail of the
+             * packed trunk a third slower, while a moderate pin stayed neutral to
+             * mildly positive (40.1 s/token at 25 GB, device throughput unharmed).
+             * So below full residency, auto pins only while the whole process stays
+             * comfortably clear of the RAM ceiling. */
+            double memtotal = 0.0;
+            FILE *mf = fopen("/proc/meminfo", "r");
+            if (mf) {
+                char ln[256];
+                while (fgets(ln, sizeof ln, mf))
+                    if (!strncmp(ln, "MemTotal:", 9)) { memtotal = atof(ln + 9) * 1024.0; break; }
+                fclose(mf);
+            }
+            const double rss_ceiling = memtotal > 0.0 ? 0.55 * memtotal / 1e9
+                                                      : usable;   /* no /proc: keep old cap */
+            double cap = rss_ceiling - reserve - cache_min;
+            if (cap < slot_min) cap = slot_min;
             trunk_gb = usable - cache_min;
+            if (trunk_gb > cap) trunk_gb = cap;
             cache_gb = cache_min;
         }
         printf("auto budget: %.1f GB available, %.1f GB reserved -> trunk %.1f GB / "
