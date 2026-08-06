@@ -132,18 +132,35 @@ static int argmax_(const float *v, int n)
  * decode by construction, and the A/B gate checks it. */
 static int spec_draft(const int *seq, int T, int cap, int *out)
 {
+    /* Evidence-gated: a draft only fires when the suffix n-gram's occurrences AGREE on
+     * what follows. Measured on the released checkpoint, an eager most-recent-match
+     * drafter went 0.91x on code: partial acceptances pay a replay sweep, so weak
+     * drafts are worse than no drafts. Rules: match length 4 (then 3); if the n-gram
+     * occurred more than once, every occurrence must propose the same next id, and the
+     * draft stops at the first position where historical continuations diverge. */
     if (cap > K3_SPEC_MAX) cap = K3_SPEC_MAX;
-    for (int n = 3; n >= 2; n--) {
+    for (int n = 4; n >= 3; n--) {
         if (T < n + 1) continue;
-        for (int j = T - n - 1; j >= 0; j--) {          /* most recent match wins */
+        int m1 = -1, m2 = -1;                            /* two most recent matches */
+        for (int j = T - n - 1; j >= 0; j--) {
             int hit = 1;
             for (int i = 0; i < n; i++)
                 if (seq[j + i] != seq[T - n + i]) { hit = 0; break; }
             if (!hit) continue;
-            int nd = 0;
-            for (int i = j + n; i < T && nd < cap; i++) out[nd++] = seq[i];
-            if (nd > 0) return nd;
+            if (m1 < 0) m1 = j;
+            else { m2 = j; break; }
         }
+        if (m1 < 0) continue;
+        int nd = 0;
+        for (int i = 0; nd < cap && m1 + n + i < T; i++) {
+            const int cand = seq[m1 + n + i];
+            if (m2 >= 0) {
+                /* stop where the two histories stop agreeing */
+                if (m2 + n + i >= m1 || seq[m2 + n + i] != cand) break;
+            }
+            out[nd++] = cand;
+        }
+        if (nd > 0) return nd;
     }
     return 0;
 }
