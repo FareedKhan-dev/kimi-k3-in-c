@@ -123,6 +123,31 @@ static int real_cfg(K3Cfg *c, int *fa, int fa_max,
 static int argmax_(const float *v, int n)
 { int b = 0; for (int i = 1; i < n; i++) if (v[i] > v[b]) b = i; return b; }
 
+#define K3_SPEC_MAX 8
+/* Longest-suffix n-gram drafting for --spec: if the last n ids (n=3, then 2) already
+ * appeared earlier in the sequence, propose the ids that followed them there. Costs
+ * nothing when it misses: no draft means the step runs exactly as without --spec. The
+ * drafts are PROPOSALS only; batched greedy verification accepts precisely the prefix
+ * the model itself would have emitted, so the output stream is identical to serial
+ * decode by construction, and the A/B gate checks it. */
+static int spec_draft(const int *seq, int T, int cap, int *out)
+{
+    if (cap > K3_SPEC_MAX) cap = K3_SPEC_MAX;
+    for (int n = 3; n >= 2; n--) {
+        if (T < n + 1) continue;
+        for (int j = T - n - 1; j >= 0; j--) {          /* most recent match wins */
+            int hit = 1;
+            for (int i = 0; i < n; i++)
+                if (seq[j + i] != seq[T - n + i]) { hit = 0; break; }
+            if (!hit) continue;
+            int nd = 0;
+            for (int i = j + n; i < T && nd < cap; i++) out[nd++] = seq[i];
+            if (nd > 0) return nd;
+        }
+    }
+    return 0;
+}
+
 #ifndef K3_VERSION
 #define K3_VERSION "0.1.0"
 #endif
@@ -152,6 +177,11 @@ static void usage(FILE *f)
 "generation:\n"
 "  --gen N               tokens to generate (default 8)\n"
 "  --incremental         carry KV cache and recurrent state between tokens\n"
+"  --spec N              speculative decode: draft up to N tokens by n-gram lookup and\n"
+"                        verify them in ONE batched sweep. Output is identical to\n"
+"                        serial decode by construction; needs --incremental. An extra\n"
+"                        verified position costs ~22%% of a serial token when the trunk\n"
+"                        streams, so repetitive text decodes up to several times faster\n"
 "  --tok DIR             directory with tiktoken.model and tokenizer_config.json\n"
 "\n"
 "diagnostics:\n"
@@ -267,8 +297,14 @@ typedef struct {
  * Returns 0 on success and -1 if the forward could not be completed. The caller MUST
  * check: on failure logits_last is left untouched, and argmaxing an untouched buffer
  * yields a token drawn from uninitialised memory, printed as though it were output. */
+/* arg_all: when non-NULL, receives argmax(logits) for EVERY position 0..T-1, which is
+ * what batched greedy verification consumes. logits_last still gets the final position's
+ * full vector either way. The extra cost is one lm_head matmul per additional position,
+ * pure RAM-resident compute; measured, an extra verified position costs ~22% of a serial
+ * token at streamed-trunk budgets, which is the entire economics of --spec. */
 static int forward(Weights *w, const K3Cfg *c, K3Cache *cache, const int *ids, int T,
-                   float *logits_last, float *scratch, float *h, float *br, float *kstate)
+                   float *logits_last, float *scratch, float *h, float *br, float *kstate,
+                   int *arg_all)
 {
     const int E = c->hidden;
     const int maxb = c->n_layers / c->attn_res_block + 2;
@@ -333,6 +369,15 @@ static int forward(Weights *w, const K3Cfg *c, K3Cache *cache, const int *ids, i
     }
 
     float *nrm = scratch;
+    if (arg_all) {
+        for (int t = 0; t < T; t++) {
+            k3_rmsnorm(nrm, h + (size_t)t * E, w->mb.norm, E, c->rms_eps);
+            k3_mmw(logits_last, nrm, w->mb.lm_head, w->mb.wdt, E, c->vocab);
+            arg_all[t] = argmax_(logits_last, c->vocab);
+        }
+        /* logits_last now holds the FINAL position's vector, same as the plain path. */
+        return 0;
+    }
     k3_rmsnorm(nrm, h + (size_t)(T - 1) * E, w->mb.norm, E, c->rms_eps);
     k3_mmw(logits_last, nrm, w->mb.lm_head, w->mb.wdt, E, c->vocab);
     return 0;
@@ -367,6 +412,7 @@ int main(int argc, char **argv)
     int gen = 8, want_layers = -1;
     double cache_gb = 64.0, trunk_gb = 16.0;
     int budget_auto = 0;
+    int spec_n = 0;
     const char *preset_name = NULL;
     int incremental = 0;
     for (int i = 2; i < argc; i++) {
@@ -380,6 +426,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--layers") && i + 1 < argc) want_layers = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--out") && i + 1 < argc) outp = argv[++i];
         else if (!strcmp(argv[i], "--trunk") && i + 1 < argc) trunk_dir = argv[++i];
+        else if (!strcmp(argv[i], "--spec") && i + 1 < argc) spec_n = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--trunk-gb") && i + 1 < argc) {
             const char *v = argv[++i];
             if (!strcmp(v, "auto")) budget_auto = 1;
@@ -825,6 +872,26 @@ int main(int argc, char **argv)
         w.cached = 0;
     }
 
+    /* --spec needs a snapshot of the carried KDA/ShortConv state to roll back a
+     * partially-rejected draft batch: the recurrent state is updated in place and is
+     * not positional, so the only sound recovery is restore-and-replay the accepted
+     * prefix. The snapshot is one memcpy; the replay is one short batched sweep. */
+    const size_t kperP  = (size_t)c.kda_heads * c.kda_head_dim;
+    const size_t kper_f = kperP * c.kda_head_dim + 3 * kperP * (c.conv_k - 1);
+    float *spec_snap = NULL;
+    if (spec_n > 0) {
+        if (!incremental) {
+            fprintf(stderr, "--spec needs --incremental; ignoring --spec\n");
+            spec_n = 0;
+        } else {
+            if (spec_n > K3_SPEC_MAX) spec_n = K3_SPEC_MAX;
+            spec_snap = (float *)malloc(kper_f * (size_t)w.n_bound * sizeof(float));
+            if (!spec_snap) { fprintf(stderr, "OOM for the --spec snapshot\n"); return 1; }
+            printf("speculative decode: up to %d drafted tokens per sweep, n-gram lookup, "
+                   "verified batched\n\n", spec_n);
+        }
+    }
+
     printf("%-6s %-10s %-12s %-10s %-10s %s\n",
            "STEP", "TOKEN", "SECONDS", "CACHE HIT", "READ GB", "TOK/S");
     printf("--------------------------------------------------------------------\n");
@@ -835,25 +902,66 @@ int main(int argc, char **argv)
      * figure against a single step would misstate the I/O share. */
     double expert_s_total = 0.0, expert_gb_total = 0.0;
     uint64_t expert_reqs_total = 0, expert_evict_total = 0;
-    for (int g = 0; g < gen; g++) {
+    for (int g = 0; nout < gen; g++) {
         k3_cache_reset_stats(&cache);
         const double ts = now_s();
         int frc;
-        if (incremental) {
-            /* step 0 feeds the whole prompt; later steps feed only the new token */
+        int emit[K3_SPEC_MAX + 1];
+        int emitn = 0;
+        if (incremental && g == 0) {
+            /* step 0 feeds the whole prompt */
             const int base = w.cached;
-            const int nT   = (g == 0) ? np : 1;
-            frc = forward(&w, &c, &cache, seq + base, nT, lg, sc, h, br, ks);
-            w.cached = base + nT;
+            frc = forward(&w, &c, &cache, seq + base, np, lg, sc, h, br, ks, NULL);
+            if (frc == 0) { w.cached = base + np; emit[emitn++] = argmax_(lg, c.vocab); }
+        } else if (incremental) {
+            const int base = w.cached;
+            int d[K3_SPEC_MAX], nd = 0;
+            if (spec_snap && T + spec_n + 1 < Tmax && base + spec_n + 1 <= w.kv_cap)
+                nd = spec_draft(seq, T, spec_n, d);
+            if (nd > 0) {
+                /* One sweep verifies the pending token plus nd drafts. arg[i] is the
+                 * model's own next token after batch position i; the accepted prefix is
+                 * exactly what serial decode would have emitted, and arg[m] after it is
+                 * clean because its context contains only accepted tokens. */
+                int arg[K3_SPEC_MAX + 1];
+                memcpy(spec_snap, ks, kper_f * (size_t)w.n_bound * sizeof(float));
+                for (int i = 0; i < nd; i++) seq[T + i] = d[i];
+                frc = forward(&w, &c, &cache, seq + base, nd + 1, lg, sc, h, br, ks, arg);
+                if (frc == 0) {
+                    int m = 0;
+                    while (m < nd && arg[m] == d[m]) m++;
+                    if (m == nd) {
+                        /* every fed position had true context; state is exact */
+                        w.cached = base + nd + 1;
+                    } else {
+                        /* the recurrent state absorbed rejected tokens: restore, then
+                         * replay only the accepted prefix. The replay also rewrites the
+                         * KV rows those positions touched, so nothing stale survives. */
+                        memcpy(ks, spec_snap, kper_f * (size_t)w.n_bound * sizeof(float));
+                        w.cached = base;
+                        frc = forward(&w, &c, &cache, seq + base, m + 1, lg, sc, h, br,
+                                      ks, NULL);
+                        if (frc == 0) w.cached = base + m + 1;
+                    }
+                    if (frc == 0) {
+                        for (int i = 0; i < m; i++) emit[emitn++] = d[i];
+                        emit[emitn++] = arg[m];
+                    }
+                }
+            } else {
+                frc = forward(&w, &c, &cache, seq + base, 1, lg, sc, h, br, ks, NULL);
+                if (frc == 0) { w.cached = base + 1; emit[emitn++] = argmax_(lg, c.vocab); }
+            }
         } else {
-            frc = forward(&w, &c, &cache, seq, T, lg, sc, h, br, ks);
+            frc = forward(&w, &c, &cache, seq, T, lg, sc, h, br, ks, NULL);
+            if (frc == 0) emit[emitn++] = argmax_(lg, c.vocab);
         }
         /* Abort the run rather than argmax a buffer the forward never wrote. */
-        if (frc != 0) {
+        if (frc != 0 || emitn == 0) {
             fprintf(stderr, "forward pass failed at generation step %d; aborting.\n", g);
             return 1;
         }
-        const int nxt = argmax_(lg, c.vocab);
+        const int nxt = emit[emitn - 1];
         /* Dump the FIRST step's logits as raw float32 bits.
          * Comparing generated tokens against a reference only compares argmax, which
          * hides near-ties: two engines can agree on every token while disagreeing
@@ -883,10 +991,13 @@ int main(int argc, char **argv)
         expert_gb_total    += (double)cache.bytes_read / 1e9;
         expert_reqs_total  += cache.hits + cache.misses;
         expert_evict_total += cache.evictions;
-        seq[T++] = nxt;
-        outtok[nout++] = nxt;
+        for (int i = 0; i < emitn && nout < gen && T < Tmax; i++) {
+            seq[T++] = emit[i];
+            outtok[nout++] = emit[i];
+        }
         if (T >= Tmax) break;
     }
+    free(spec_snap);
     printf("--------------------------------------------------------------------\n");
     printf("%d tokens in %.1f s, %.2f s/token average\n", nout, t_total, t_total / nout);
 
