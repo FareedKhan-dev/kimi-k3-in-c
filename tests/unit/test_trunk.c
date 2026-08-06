@@ -503,11 +503,14 @@ static int test_truncated(const char *dir, const K3Cfg *c)
     K3LayerBind b2;
     memset(&b2, 0xAB, sizeof b2);
 
-    /* Prefetch L2 */
+    /* Prefetch L2 — the failed read must not be counted as a miss */
+    uint64_t misses_before = tr.misses;
     k3_trunk_prefetch(&tr, 2);
 
     int rc = k3_trunk_bind(&tr, c, 2, &b2);
     ck(rc == -1, "truncated: bind L2 returns -1", "");
+    ck(tr.misses == misses_before,
+       "truncated: misses unchanged after failed read", "");
 
     /* Verify no slot publishes layer 2: slot_of[2] untouched, and every
      * layer_of[*] is not 2. The failed prefetch must not corrupt the ring. */
