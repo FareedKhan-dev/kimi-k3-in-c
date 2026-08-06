@@ -247,16 +247,23 @@ void k3_matmul(float *y, const float *x, const float *W, int in, int out)
 #endif
     for (int o = 0; o < out; o++) {
         const float *row = W + (size_t)o * in;
-        double a0 = 0.0, a1 = 0.0, a2 = 0.0, a3 = 0.0;
+        /* Sixteen accumulators, EXPLICITLY fused products. fma() in double is the
+         * same IEEE operation as _mm256_fmadd_pd per lane, so the scalar and vector
+         * paths stay bit-identical while the dependent-add latency chain that made
+         * one accumulator ~10x slower than the machine's floor disappears. The
+         * reduction pairs lanes exactly the way the vector path's (v0+v1)+(v2+v3)
+         * then cross-lane tree does; change one and you must change the other. */
+        double a[16] = {0};
         int i = 0;
-        for (; i + 3 < in; i += 4) {
-            a0 += (double)row[i    ] * (double)x[i    ];
-            a1 += (double)row[i + 1] * (double)x[i + 1];
-            a2 += (double)row[i + 2] * (double)x[i + 2];
-            a3 += (double)row[i + 3] * (double)x[i + 3];
-        }
-        double acc = (a0 + a1) + (a2 + a3);
-        for (; i < in; i++) acc += (double)row[i] * (double)x[i];
+        for (; i + 15 < in; i += 16)
+            for (int l = 0; l < 16; l++)
+                a[l] = fma((double)row[i + l], (double)x[i + l], a[l]);
+        double b0 = (a[0] + a[4]) + (a[8]  + a[12]);
+        double b1 = (a[1] + a[5]) + (a[9]  + a[13]);
+        double b2 = (a[2] + a[6]) + (a[10] + a[14]);
+        double b3 = (a[3] + a[7]) + (a[11] + a[15]);
+        double acc = (b0 + b1) + (b2 + b3);
+        for (; i < in; i++) acc = fma((double)row[i], (double)x[i], acc);
         y[o] = (float)acc;
     }
 }
@@ -902,33 +909,55 @@ void k3_matmul_bf16(float *y, const float *x, const uint16_t *W, int in, int out
         double acc;
 #if defined(__AVX2__)
         {
-            __m256d v = _mm256_setzero_pd();
-            for (; i + 3 < in; i += 4) {
-                /* bf16 -> f32 is a 16-bit left shift, so widen the four u16 to u32,
-                 * shift, and reinterpret. No table, no rounding. */
-                const __m128i h  = _mm_loadl_epi64((const __m128i *)(row + i));
-                const __m128i b32 = _mm_slli_epi32(_mm_cvtepu16_epi32(h), 16);
-                const __m256d wd = _mm256_cvtps_pd(_mm_castsi128_ps(b32));
-                const __m256d xd = _mm256_cvtps_pd(_mm_loadu_ps(x + i));
-                v = _mm256_add_pd(v, _mm256_mul_pd(wd, xd));   /* NOT fmadd: see above */
+            /* Four vector accumulators, fused. _mm256_fmadd_pd per lane is the same
+             * IEEE operation as scalar fma() in double, and the reduction below is
+             * lane-for-lane the tree k3_matmul's sixteen scalar accumulators use, so
+             * the two kernels remain BITWISE identical (test_ops asserts it). The old
+             * one-accumulator mul+add form serialized on add latency at 4 elements
+             * per ~4 cycles; this runs the memory-bound side of the roof instead. */
+            __m256d v0 = _mm256_setzero_pd(), v1 = _mm256_setzero_pd();
+            __m256d v2 = _mm256_setzero_pd(), v3 = _mm256_setzero_pd();
+            for (; i + 15 < in; i += 16) {
+                /* bf16 -> f32 is a 16-bit left shift, so widen u16 to u32, shift,
+                 * and reinterpret. No table, no rounding. */
+                const __m128i h0 = _mm_loadl_epi64((const __m128i *)(row + i));
+                const __m128i h1 = _mm_loadl_epi64((const __m128i *)(row + i + 4));
+                const __m128i h2 = _mm_loadl_epi64((const __m128i *)(row + i + 8));
+                const __m128i h3 = _mm_loadl_epi64((const __m128i *)(row + i + 12));
+                v0 = _mm256_fmadd_pd(
+                    _mm256_cvtps_pd(_mm_castsi128_ps(_mm_slli_epi32(_mm_cvtepu16_epi32(h0), 16))),
+                    _mm256_cvtps_pd(_mm_loadu_ps(x + i)), v0);
+                v1 = _mm256_fmadd_pd(
+                    _mm256_cvtps_pd(_mm_castsi128_ps(_mm_slli_epi32(_mm_cvtepu16_epi32(h1), 16))),
+                    _mm256_cvtps_pd(_mm_loadu_ps(x + i + 4)), v1);
+                v2 = _mm256_fmadd_pd(
+                    _mm256_cvtps_pd(_mm_castsi128_ps(_mm_slli_epi32(_mm_cvtepu16_epi32(h2), 16))),
+                    _mm256_cvtps_pd(_mm_loadu_ps(x + i + 8)), v2);
+                v3 = _mm256_fmadd_pd(
+                    _mm256_cvtps_pd(_mm_castsi128_ps(_mm_slli_epi32(_mm_cvtepu16_epi32(h3), 16))),
+                    _mm256_cvtps_pd(_mm_loadu_ps(x + i + 12)), v3);
             }
+            /* (v0+v1)+(v2+v3) lanewise, then the same cross-lane pairing as scalar */
+            const __m256d vt = _mm256_add_pd(_mm256_add_pd(v0, v1),
+                                             _mm256_add_pd(v2, v3));
             double a[4];
-            _mm256_storeu_pd(a, v);
+            _mm256_storeu_pd(a, vt);
             acc = (a[0] + a[1]) + (a[2] + a[3]);
         }
 #else
         {
-            double a0 = 0.0, a1 = 0.0, a2 = 0.0, a3 = 0.0;
-            for (; i + 3 < in; i += 4) {
-                a0 += (double)k3_bf16f(row[i    ]) * (double)x[i    ];
-                a1 += (double)k3_bf16f(row[i + 1]) * (double)x[i + 1];
-                a2 += (double)k3_bf16f(row[i + 2]) * (double)x[i + 2];
-                a3 += (double)k3_bf16f(row[i + 3]) * (double)x[i + 3];
-            }
-            acc = (a0 + a1) + (a2 + a3);
+            double a[16] = {0};
+            for (; i + 15 < in; i += 16)
+                for (int l = 0; l < 16; l++)
+                    a[l] = fma((double)k3_bf16f(row[i + l]), (double)x[i + l], a[l]);
+            double b0 = (a[0] + a[4]) + (a[8]  + a[12]);
+            double b1 = (a[1] + a[5]) + (a[9]  + a[13]);
+            double b2 = (a[2] + a[6]) + (a[10] + a[14]);
+            double b3 = (a[3] + a[7]) + (a[11] + a[15]);
+            acc = (b0 + b1) + (b2 + b3);
         }
 #endif
-        for (; i < in; i++) acc += (double)k3_bf16f(row[i]) * (double)x[i];
+        for (; i < in; i++) acc = fma((double)k3_bf16f(row[i]), (double)x[i], acc);
         y[o] = (float)acc;
     }
 }
