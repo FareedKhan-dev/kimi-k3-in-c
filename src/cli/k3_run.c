@@ -141,7 +141,9 @@ static void usage(FILE *f)
 "  --ids 1,2,3           raw token ids; the reproducible channel used by the tests\n"
 "\n"
 "memory:\n"
-"  --preset NAME         laptop | desktop | workstation | server | max\n"
+"  --preset NAME         auto | laptop | desktop | workstation | server | max\n"
+"                        auto sizes both budgets from this machine's free RAM,\n"
+"                        trunk-first; also spelled --trunk-gb auto\n"
 "  --list-presets        show each preset's split and expected speed\n"
 "  --trunk DIR           packed trunk directory; enables streaming (see scripts/)\n"
 "  --trunk-gb X          trunk ring / pinned-layer budget\n"
@@ -208,6 +210,8 @@ static void k3_preset_list(FILE *f)
     for (int i = 0; i < K3_NPRESET; i++)
         fprintf(f, "  %-12s %6.1f / %-6.1f  %s\n", K3_PRESETS[i].name,
                 K3_PRESETS[i].trunk_gb, K3_PRESETS[i].cache_gb, K3_PRESETS[i].note);
+    fprintf(f, "  %-12s %6s / %-6s  %s\n", "auto", "fit", "fit",
+            "sizes both from this machine's free RAM, trunk-first. Recommended.");
     fprintf(f, "\nAll presets stream the trunk, so they need --trunk <packed_dir>.\n"
                "Run scripts/k3-doctor.sh to see which one this machine fits.\n");
 }
@@ -362,6 +366,7 @@ int main(int argc, char **argv)
     const char *cfg_path = NULL;
     int gen = 8, want_layers = -1;
     double cache_gb = 64.0, trunk_gb = 16.0;
+    int budget_auto = 0;
     const char *preset_name = NULL;
     int incremental = 0;
     for (int i = 2; i < argc; i++) {
@@ -375,10 +380,21 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--layers") && i + 1 < argc) want_layers = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--out") && i + 1 < argc) outp = argv[++i];
         else if (!strcmp(argv[i], "--trunk") && i + 1 < argc) trunk_dir = argv[++i];
-        else if (!strcmp(argv[i], "--trunk-gb") && i + 1 < argc) trunk_gb = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--trunk-gb") && i + 1 < argc) {
+            const char *v = argv[++i];
+            if (!strcmp(v, "auto")) budget_auto = 1;
+            else { trunk_gb = atof(v); budget_auto = 0; }
+        }
         else if (!strcmp(argv[i], "--incremental")) incremental = 1;
         else if (!strcmp(argv[i], "--dump-logits") && i + 1 < argc) logits_path = argv[++i];
         else if (!strcmp(argv[i], "--dump-cache-trace") && i + 1 < argc) trace_dir = argv[++i];
+        else if (!strcmp(argv[i], "--preset") && i + 1 < argc && !strcmp(argv[i + 1], "auto")) {
+            /* Not in the table: the table is fixed budgets, auto is computed from this
+             * machine's MemAvailable at startup, below, once parsing is complete. */
+            i++;
+            budget_auto = 1;
+            preset_name = "auto";
+        }
         else if (!strcmp(argv[i], "--preset") && i + 1 < argc) {
             const K3Preset *p = k3_preset_find(argv[++i]);
             if (!p) {
@@ -412,6 +428,45 @@ int main(int argc, char **argv)
             fprintf(stderr, "--ids, --prompt and --prompt-file are mutually exclusive\n");
             return 2;
         }
+    }
+
+    /* ---- auto budget ----
+     * RAM-first: per token the engine re-reads the ENTIRE streamed trunk but only
+     * ~25.8 GB of experts, and steady-state expert caching yields nothing until the
+     * arena is tens of GB. Measured: a gigabyte pinned in the trunk is worth roughly
+     * 70x a gigabyte of expert cache at the margin. So auto gives the trunk everything
+     * this machine has, minus a safety margin, and the cache gets real memory only
+     * after the whole 110 GB trunk would be resident. */
+    if (budget_auto) {
+        const double avail = mem_available_bytes();
+        if (avail <= 0.0) {
+            fprintf(stderr, "--preset auto needs /proc/meminfo; pass explicit "
+                            "--trunk-gb/--cache-gb on this platform\n");
+            return 2;
+        }
+        /* Fixed costs outside both budgets: embeddings + lm_head 4.70 GB, safetensors
+         * index, recurrent state 0.63 GB, KV cache and scratch. Reserve them plus a
+         * 2 GB + 2% margin so auto never invites the OOM killer. */
+        const double reserve = 2.0 + 0.02 * (avail / 1e9) + 4.70 + 1.70;
+        double usable = avail / 1e9 - reserve;
+        const double slot_min = 2.5;   /* one ring slot + headroom; refuse below */
+        const double cache_min = 0.5;  /* topk+1 expert slots is ~0.3 GB */
+        if (usable < slot_min + cache_min) {
+            fprintf(stderr, "auto: only %.1f GB usable after the %.1f GB reserve; "
+                            "below the %.1f GB floor. Pass explicit budgets.\n",
+                    usable, reserve, slot_min + cache_min);
+            return 2;
+        }
+        const double trunk_full = 111.0;   /* full packed trunk + widen headroom */
+        if (usable - cache_min >= trunk_full) {
+            trunk_gb = trunk_full;
+            cache_gb = usable - trunk_full;
+        } else {
+            trunk_gb = usable - cache_min;
+            cache_gb = cache_min;
+        }
+        printf("auto budget: %.1f GB available, %.1f GB reserved -> trunk %.1f GB / "
+               "expert cache %.1f GB\n", avail / 1e9, reserve, trunk_gb, cache_gb);
     }
 
     /* fa is sized for the released 24 MLA layers with generous headroom; k3_cfg_load
