@@ -19,6 +19,15 @@ analytic cap.
 **`test_cache`**, the streaming expert cache: prefetch, eviction, and mixed batch/serial
 access. Uses a synthetic shard of structurally faithful experts, a few KB.
 
+**`test_trunk`**, the streaming trunk: ring-slot budget enforcement, one-slot
+guard, async prefetch, slot-isolation under concurrency, ring wrap-around, and
+truncated-read failure isolation. Uses a synthetic 3-layer trunk fixture of a few
+KB that is generated inline, so no checkpoint is required. The one-slot guard check
+fails against any build that starts the reader thread unconditionally, which is the
+condition the real model exhibited as silent token corruption: with one ring slot
+the reader would write layer L+1 over layer L while the caller was still computing
+on it, producing fluent but wrong tokens with no diagnostic.
+
 **`test_st`**, the safetensors reader: dtype widening, offsets, tail bytes, escaped
 tensor names, and a tensor deliberately containing non-finite values.
 
