@@ -694,13 +694,26 @@ void k3_kda_layer(float *out, const float *x, const K3KdaW *w, const K3Cfg *c,
         S = Sown;
     }
     const float qscale = 1.0f / sqrtf((float)D);
-    for (int t = 0; t < T; t++)
-        for (int h = 0; h < H; h++) {
+    /* Heads are independent: each reads and writes only its own S block, its own D-wide
+     * slice of q/k/v/al/o, and its own beta column. The recurrence is sequential in t
+     * WITHIN a head, so the loops nest head-outer here and each head walks its own t in
+     * order; per-head arithmetic is untouched and the results are bit-identical to the
+     * serial form (gated by test_ops' kda fixtures under 1 vs N threads). The recurrence
+     * is 0.4% of FLOPs but, serial, it is a majority of non-matmul wall time at high
+     * core counts. wr is a full P-wide work row, so wr + h*D gives each head a private
+     * slice with no new allocation. */
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static)
+#endif
+    for (int h = 0; h < H; h++) {
+        float *wh = wr + (size_t)h * D;
+        for (int t = 0; t < T; t++) {
             const size_t off = (size_t)t * P + (size_t)h * D;
-            for (int i = 0; i < D; i++) wr[i] = q[off + i] * qscale;
-            k3_kda_step(S + (size_t)h * D * D, o + off, wr, k + off, v + off,
+            for (int i = 0; i < D; i++) wh[i] = q[off + i] * qscale;
+            k3_kda_step(S + (size_t)h * D * D, o + off, wh, k + off, v + off,
                         al + off, bt[(size_t)t * H + h], D, D);
         }
+    }
 
     /* 7/8/9. head-wise RMSNorm, THEN the gate, THEN the output projection */
     for (int t = 0; t < T; t++) {
