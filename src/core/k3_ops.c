@@ -1069,30 +1069,39 @@ void k3_matmul_mxfp4(float *y, const float *x, const unsigned char *packed,
              *
              * The lane split changes the summation order. See the accuracy contract on
              * the function above for why that is bounded at ~1e-16 relative. */
-            double s0 = 0.0, s1 = 0.0, s2 = 0.0, s3 = 0.0;
+            /* Two fused vector accumulators over the 32-element group, element i to
+             * accumulator (i/4)%2, lanewise-summed then cross-lane paired; the scalar
+             * path is the identical partition with fma(), which is the same IEEE
+             * operation, so both paths stay bit-identical. Same reasoning as the
+             * fp32/bf16 kernels above; the group is short, so two accumulators
+             * suffice to break the add-latency chain. */
+            double sub;
             int i = 0;
 #if defined(__AVX2__)
             {
-                __m256d v = _mm256_setzero_pd();
-                for (; i + 3 < n; i += 4) {
-                    const __m256d wd = _mm256_cvtps_pd(_mm_loadu_ps(wf + i));
-                    const __m256d xd = _mm256_cvtps_pd(_mm_loadu_ps(xg + i));
-                    v = _mm256_add_pd(v, _mm256_mul_pd(wd, xd));  /* not fmadd */
+                __m256d v0 = _mm256_setzero_pd(), v1 = _mm256_setzero_pd();
+                for (; i + 7 < n; i += 8) {
+                    v0 = _mm256_fmadd_pd(_mm256_cvtps_pd(_mm_loadu_ps(wf + i)),
+                                         _mm256_cvtps_pd(_mm_loadu_ps(xg + i)), v0);
+                    v1 = _mm256_fmadd_pd(_mm256_cvtps_pd(_mm_loadu_ps(wf + i + 4)),
+                                         _mm256_cvtps_pd(_mm_loadu_ps(xg + i + 4)), v1);
                 }
                 double a[4];
-                _mm256_storeu_pd(a, v);
-                s0 = a[0]; s1 = a[1]; s2 = a[2]; s3 = a[3];
+                _mm256_storeu_pd(a, _mm256_add_pd(v0, v1));
+                sub = (a[0] + a[1]) + (a[2] + a[3]);
             }
 #else
-            for (; i + 3 < n; i += 4) {
-                s0 += (double)wf[i    ] * (double)xg[i    ];
-                s1 += (double)wf[i + 1] * (double)xg[i + 1];
-                s2 += (double)wf[i + 2] * (double)xg[i + 2];
-                s3 += (double)wf[i + 3] * (double)xg[i + 3];
+            {
+                double s[8] = {0};
+                for (; i + 7 < n; i += 8)
+                    for (int l = 0; l < 8; l++)
+                        s[l] = fma((double)wf[i + l], (double)xg[i + l], s[l]);
+                double b0 = s[0] + s[4], b1 = s[1] + s[5];
+                double b2 = s[2] + s[6], b3 = s[3] + s[7];
+                sub = (b0 + b1) + (b2 + b3);
             }
 #endif
-            double sub = (s0 + s1) + (s2 + s3);
-            for (; i < n; i++) sub += (double)wf[i] * (double)xg[i];
+            for (; i < n; i++) sub = fma((double)wf[i], (double)xg[i], sub);
             acc += sub * (double)K3_E8M0[sb];
         }
         y[r] = (float)acc;
