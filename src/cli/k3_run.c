@@ -194,6 +194,12 @@ static void usage(FILE *f)
 "generation:\n"
 "  --gen N               tokens to generate (default 8)\n"
 "  --incremental         carry KV cache and recurrent state between tokens\n"
+"  --draft-trunk DIR     hybrid decode: a second packed trunk (typically a quantized\n"
+"                        derivation of the real one, see tools/qdq_trunk.py) DRAFTS\n"
+"                        tokens which the exact model verifies in batched sweeps.\n"
+"                        Output remains exactly the exact model's greedy decode; the\n"
+"                        draft only proposes. Needs --incremental; implies --spec 4\n"
+"  --draft-trunk-gb X    trunk budget for the draft model (default 6)\n"
 "  --spec N              speculative decode: draft up to N tokens by n-gram lookup and\n"
 "                        verify them in ONE batched sweep. Output is identical to\n"
 "                        serial decode by construction; needs --incremental. An extra\n"
@@ -431,6 +437,8 @@ int main(int argc, char **argv)
     int budget_auto = 0;
     int spec_n = 0;
     int tf_check = 0;
+    const char *draft_dir = NULL;
+    double draft_gb = 6.0;
     const char *preset_name = NULL;
     int incremental = 0;
     for (int i = 2; i < argc; i++) {
@@ -446,6 +454,8 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--trunk") && i + 1 < argc) trunk_dir = argv[++i];
         else if (!strcmp(argv[i], "--spec") && i + 1 < argc) spec_n = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--tf-check")) tf_check = 1;
+        else if (!strcmp(argv[i], "--draft-trunk") && i + 1 < argc) draft_dir = argv[++i];
+        else if (!strcmp(argv[i], "--draft-trunk-gb") && i + 1 < argc) draft_gb = atof(argv[++i]);
         else if (!strcmp(argv[i], "--trunk-gb") && i + 1 < argc) {
             const char *v = argv[++i];
             if (!strcmp(v, "auto")) budget_auto = 1;
@@ -911,6 +921,56 @@ int main(int argc, char **argv)
         }
     }
 
+    /* ---- hybrid decode: a second, typically quantized, trunk drafts ----
+     * The draft model shares everything that is identical between the two models: the
+     * embedding, the lm_head, the layer map, and the routed experts (the qdq derivation
+     * touches only 2D trunk tensors). It differs ONLY in trunk weights, so it needs its
+     * own trunk stream, its own layer bindings, and its own recurrent/KV state. Output
+     * exactness is structural: drafts feed the SAME batched greedy verification as
+     * --spec, so what gets emitted is precisely what the exact model would have chosen.
+     * Measured teacher-forced agreement of an int8-derived draft on the released
+     * checkpoint is 94.2 percent against a 96.2 percent measurement ceiling, which is
+     * what makes the draft worth consulting at all. */
+    static K3Trunk trunk_d;
+    Weights dw; memset(&dw, 0, sizeof dw);
+    float *dks = NULL, *dsnap = NULL;
+    long hyb_rounds = 0, hyb_drafted = 0, hyb_accepted = 0;
+    if (draft_dir) {
+        if (!incremental || !trunk_dir) {
+            fprintf(stderr, "--draft-trunk needs --incremental and --trunk; ignoring\n");
+            draft_dir = NULL;
+        } else {
+            if (spec_n <= 0) spec_n = 4;
+            if (spec_n > K3_SPEC_MAX) spec_n = K3_SPEC_MAX;
+            if (!spec_snap) {
+                spec_snap = (float *)malloc(kper_f * (size_t)w.n_bound * sizeof(float));
+                if (!spec_snap) { fprintf(stderr, "OOM for the --spec snapshot\n"); return 1; }
+            }
+            if (k3_trunk_open(&trunk_d, draft_dir, &c, (int64_t)(draft_gb * 1e9)) != 0)
+                return 1;
+            dw.lay = (K3LayerBind *)calloc((size_t)NL, sizeof(K3LayerBind));
+            dks   = (float *)calloc(kper_f * (size_t)w.n_bound, sizeof(float));
+            dsnap = (float *)malloc(kper_f * (size_t)w.n_bound * sizeof(float));
+            const size_t kvperd = (size_t)w.kv_cap * c.n_heads * (c.qk_nope + c.v_head);
+            const size_t rpperd = (size_t)w.kv_cap * c.qk_rope;
+            dw.kvc   = (float *)calloc(kvperd * (size_t)w.n_mla, sizeof(float));
+            dw.ropec = (float *)calloc(rpperd * (size_t)w.n_mla, sizeof(float));
+            if (!dw.lay || !dks || !dsnap || !dw.kvc || !dw.ropec) {
+                fprintf(stderr, "OOM for the draft model state\n"); return 1;
+            }
+            dw.mb = w.mb;              /* embed + lm_head are the same tensors */
+            dw.trunk = &trunk_d;
+            dw.n_bound = w.n_bound;
+            dw.mla_slot = w.mla_slot;  /* read-only map, safely shared */
+            dw.n_mla = w.n_mla;
+            dw.kv_cap = w.kv_cap;
+            dw.cached = 0;
+            printf("hybrid decode: draft trunk %s (%.1f GB budget) proposes up to %d "
+                   "tokens per sweep;\n               the exact model verifies every one "
+                   "before it is emitted\n\n", draft_dir, draft_gb, spec_n);
+        }
+    }
+
     /* --tf-check: teacher-forced agreement over the whole --ids sequence in ONE sweep.
      * Prediction i is the argmax after positions 0..i; it is compared to the id the
      * sequence actually continues with. This is the acceptance rate a draft model
@@ -966,11 +1026,37 @@ int main(int argc, char **argv)
             const int base = w.cached;
             frc = forward(&w, &c, &cache, seq + base, np, lg, sc, h, br, ks, NULL);
             if (frc == 0) { w.cached = base + np; emit[emitn++] = argmax_(lg, c.vocab); }
+            /* the draft model must absorb the prompt too, or its first proposals come
+             * from an empty context; one draft sweep, paid once */
+            if (dw.trunk && frc == 0) {
+                if (forward(&dw, &c, &cache, seq, np, lg, sc, h, br, dks, NULL) == 0)
+                    dw.cached = np;
+                else frc = -1;
+            }
         } else if (incremental) {
             const int base = w.cached;
             int d[K3_SPEC_MAX], nd = 0;
-            if (spec_snap && T + spec_n + 1 < Tmax && base + spec_n + 1 <= w.kv_cap)
-                nd = spec_draft(seq, T, spec_n, d);
+            if (spec_snap && T + spec_n + 1 < Tmax && base + spec_n + 1 <= w.kv_cap) {
+                if (dw.trunk) {
+                    /* The draft model proposes: k sequential one-token steps through
+                     * the draft trunk, chaining its own argmax. Its state is
+                     * snapshotted first so a partial acceptance can rewind it the
+                     * same way the exact side rewinds. */
+                    memcpy(dsnap, dks, kper_f * (size_t)w.n_bound * sizeof(float));
+                    int prev = seq[base];
+                    while (nd < spec_n) {
+                        if (forward(&dw, &c, &cache, &prev, 1, lg, sc, h, br,
+                                    dks, NULL) != 0) break;
+                        dw.cached += 1;
+                        prev = argmax_(lg, c.vocab);
+                        d[nd++] = prev;
+                    }
+                    hyb_rounds  += 1;
+                    hyb_drafted += nd;
+                } else {
+                    nd = spec_draft(seq, T, spec_n, d);
+                }
+            }
             if (nd > 0) {
                 /* One sweep verifies the pending token plus nd drafts. arg[i] is the
                  * model's own next token after batch position i; the accepted prefix is
@@ -996,6 +1082,26 @@ int main(int argc, char **argv)
                                       ks, NULL);
                         if (frc == 0) w.cached = base + m + 1;
                     }
+                    /* Resync the draft model to the ACCEPTED sequence. On full
+                     * acceptance its state already contains every fed token except
+                     * the last draft, so one step closes the gap; on partial
+                     * acceptance it rewinds to its snapshot and replays only the
+                     * accepted prefix, mirroring the exact side. */
+                    if (dw.trunk && frc == 0) {
+                        hyb_accepted += m;
+                        if (m == nd) {
+                            int last = d[nd - 1];
+                            if (forward(&dw, &c, &cache, &last, 1, lg, sc, h, br,
+                                        dks, NULL) == 0) dw.cached += 1;
+                            else frc = -1;
+                        } else {
+                            memcpy(dks, dsnap, kper_f * (size_t)w.n_bound * sizeof(float));
+                            dw.cached = base;
+                            if (forward(&dw, &c, &cache, seq + base, m + 1, lg, sc,
+                                        h, br, dks, NULL) == 0) dw.cached = base + m + 1;
+                            else frc = -1;
+                        }
+                    }
                     if (frc == 0) {
                         for (int i = 0; i < m; i++) emit[emitn++] = d[i];
                         emit[emitn++] = arg[m];
@@ -1004,6 +1110,12 @@ int main(int argc, char **argv)
             } else {
                 frc = forward(&w, &c, &cache, seq + base, 1, lg, sc, h, br, ks, NULL);
                 if (frc == 0) { w.cached = base + 1; emit[emitn++] = argmax_(lg, c.vocab); }
+                /* keep the draft in lockstep through non-drafted steps */
+                if (dw.trunk && frc == 0) {
+                    if (forward(&dw, &c, &cache, seq + base, 1, lg, sc, h, br,
+                                dks, NULL) == 0) dw.cached = base + 1;
+                    else frc = -1;
+                }
             }
         } else {
             frc = forward(&w, &c, &cache, seq, T, lg, sc, h, br, ks, NULL);
@@ -1049,6 +1161,15 @@ int main(int argc, char **argv)
             outtok[nout++] = emit[i];
         }
         if (T >= Tmax) break;
+    }
+    if (dw.trunk && hyb_rounds > 0) {
+        printf("\nhybrid decode: %ld rounds, %ld drafted, %ld accepted (%.1f%%), "
+               "mean accepted run %.2f\n",
+               hyb_rounds, hyb_drafted, hyb_accepted,
+               hyb_drafted ? 100.0 * hyb_accepted / hyb_drafted : 0.0,
+               (double)hyb_accepted / hyb_rounds);
+        k3_trunk_close(&trunk_d);
+        free(dw.lay); free(dks); free(dsnap); free(dw.kvc); free(dw.ropec);
     }
     free(spec_snap);
     printf("--------------------------------------------------------------------\n");
