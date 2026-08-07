@@ -394,6 +394,13 @@ extern long k3_expert_drops;
 void   k3_moe(float *out, const float *x, const K3MoeW *w, const K3Cfg *c,
               int T, int *idx, float *wt, float *scratch);
 
+/* Batched MoE for prefill over a chunk of T tokens: fetches each unique routed expert
+ * from disk ONCE and reuses it across the chunk, cutting prefill expert I/O ~3-4x, with
+ * per-token output bit-identical to k3_moe. Streamed source only (w->src != NULL); falls
+ * back to k3_moe for the resident path or T <= 1. */
+void   k3_moe_prefill(float *out, const float *x, const K3MoeW *w, const K3Cfg *c,
+                      int T, int *idx, float *wt, float *scratch);
+
 /* Kimi Delta Attention, one full layer, one sequence, no cache.
  * Verified against modeling_kimi_linear.py:543-663 and fla/ops/kda/naive.py.
  *
