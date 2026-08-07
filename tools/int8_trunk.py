@@ -18,7 +18,6 @@ I8R dtype.
 """
 import json
 import os
-import struct
 import sys
 
 import numpy as np

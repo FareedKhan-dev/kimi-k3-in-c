@@ -78,7 +78,7 @@ def main():
     done_b = 0
     for lay in man["layers"]:
         base = lay["file_off"]
-        for name, t in lay["tensors"].items():
+        for _name, t in lay["tensors"].items():
             if t.get("dtype") not in ("BF16", "bf16"):
                 continue
             shape = t.get("shape") or []
