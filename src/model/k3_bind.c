@@ -339,17 +339,50 @@ int k3_bind_layer_mem(const K3Cfg *c, int L, K3LayerBind *b,
             fprintf(stderr, "k3_bind_mem: %s not present in the packed run\n", q->name);
             return -1;
         }
-        /* Per-row int8 draft weight: [f32 scale][int8 * cols] per row. It is only ever a
-         * narrow (matmul) weight; point straight at it and tag the layer K3_WI8. The
-         * element-count check below does not apply to a scale-interleaved row layout, so
-         * it is skipped here; the packer owns the shape. */
+        /* Per-row int8 draft weight: [f32 scale][int8 * cols] per row. A matmul weight is
+         * pointed at directly and the layer is tagged K3_WI8; a tensor the engine reads
+         * elementwise as fp32 (the AttnRes projection) is DEQUANTISED into the widen
+         * buffer here, row scale times int8, exactly parallel to the bf16 widen path.
+         * The element-count check does not apply to the scale-interleaved layout; the
+         * packer owns the shape. */
         if (dt == K3_DT_I8R) {
-            if (!q->narrow) {
-                fprintf(stderr, "k3_bind_mem: %s is int8 but wanted as fp32\n", q->name);
+            if (q->narrow) {
+                *q->dest = run + off;
+                i8_seen = 1;
+                continue;
+            }
+            /* want fp32: dequantise. take is the logical element count (rows*cols); the
+             * row width is derivable because each row is [4 bytes scale][cols int8] and
+             * nb = rows*(4+cols) with rows*cols == take. Solve rows from nb and take. */
+            const int64_t take = q->take;
+            /* nb = rows*4 + take  ->  rows = (nb - take)/4 */
+            if ((nb - take) % 4 != 0) {
+                fprintf(stderr, "k3_bind_mem: %s bad int8 layout\n", q->name);
                 return -1;
             }
-            *q->dest = run + off;
-            i8_seen = 1;
+            const int64_t rows = (nb - take) / 4;
+            if (rows <= 0 || take % rows != 0) {
+                fprintf(stderr, "k3_bind_mem: %s bad int8 shape\n", q->name);
+                return -1;
+            }
+            const int64_t cols = take / rows;
+            w = (w + 7u) & ~(size_t)7u;
+            if (w + (size_t)take * 4 > widen_cap) {
+                fprintf(stderr, "k3_bind_mem: widen area too small at %s\n", q->name);
+                return -1;
+            }
+            float *dst = (float *)(widen + w);
+            const unsigned char *rp = run + off;
+            const size_t rowb = 4u + (size_t)cols;
+            for (int64_t r = 0; r < rows; r++) {
+                float scale;
+                memcpy(&scale, rp + (size_t)r * rowb, 4);
+                const signed char *q8 = (const signed char *)(rp + (size_t)r * rowb + 4);
+                for (int64_t k = 0; k < cols; k++)
+                    dst[r * cols + k] = (float)q8[k] * scale;
+            }
+            *q->dest = dst;
+            w += (size_t)take * 4;
             continue;
         }
         const int esz = (dt == K3_DT_F32) ? 4 : (dt == K3_DT_U8 ? 1 : 2);
