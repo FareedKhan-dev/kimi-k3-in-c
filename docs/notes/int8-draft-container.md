@@ -61,7 +61,37 @@ experts, the same as a real decode step. A draft that costs as much as the thing
 cannot amortise anything. Splitting a 64 GB machine 56/2.5 between draft and exact also starved
 the exact model's trunk budget, so its verify sweeps streamed the full bf16 trunk.
 
-## What actually makes the hybrid pay
+## Cache-only routing: built, and the economics measured
+
+The fix was implemented: `K3ExpertSrc::resident` plus a `cache_only` MoE mode make the draft
+route only among experts already in the cache and renormalise over them, so a drafted token
+reads zero new expert bytes. Output stays bit-exact (the exact model verifies), and the
+weightless gates are untouched.
+
+Measured, it revealed the real tension. With cache-only routing and a small (4 GB) expert
+cache, draft acceptance collapsed from 66-100% to 12.5%, because the cache held under 1% of
+the experts so the draft routed among far too few and proposed badly. The draft became cheap
+but useless. So the two dead ends are:
+
+- full-routing draft: accurate, but streams all experts, so a draft step costs as much as a
+  real one;
+- cache-only draft: cheap, but accurate only when the cache holds most routed experts.
+
+Both are resolved only in the same place: LARGE RAM. The hybrid pays when the 55 GB int8 draft
+trunk is resident AND the expert cache is large enough (tens of GB) that cache-only routing
+stays accurate AND the exact model still has a trunk pin. That is a 100 GB-plus machine, not a
+laptop, and at 128 GB plain exact decode is already 5.59 s/token, so the hybrid's marginal gain
+there is uncertain and unproven. It is not the laptop lever it was hoped to be.
+
+## Status
+
+The container, the q8 kernel, the I8R format, the bind wiring, and cache-only routing are all
+built, correct, and bit-exact, and are a reusable foundation. The honest conclusion is that the
+quantized-self-draft hybrid is a large-memory technique with narrow, unproven economics, not a
+consumer-laptop speedup. The laptop wins are elsewhere: the fused kernels, RAM-first pinning,
+chunk-union prefill, and conversation resume, all measured.
+
+## What was hoped, before the measurements
 
 The missing piece is a CHEAP draft on the expert side, so a proposal costs far less than a real
 step. Two routes, both identity-safe because the draft only proposes:
