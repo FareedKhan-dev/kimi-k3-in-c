@@ -331,12 +331,26 @@ int k3_bind_layer_mem(const K3Cfg *c, int L, K3LayerBind *b,
 
     size_t w = 0;
     int narrowed_all = 1;
+    int i8_seen = 0;
     for (int i = 0; i < p.n; i++) {
         Req *q = &p.r[i];
         int64_t off = 0, nb = 0; int dt = 0;
         if (src->find(src->ctx, q->name, &off, &nb, &dt) != 0) {
             fprintf(stderr, "k3_bind_mem: %s not present in the packed run\n", q->name);
             return -1;
+        }
+        /* Per-row int8 draft weight: [f32 scale][int8 * cols] per row. It is only ever a
+         * narrow (matmul) weight; point straight at it and tag the layer K3_WI8. The
+         * element-count check below does not apply to a scale-interleaved row layout, so
+         * it is skipped here; the packer owns the shape. */
+        if (dt == K3_DT_I8R) {
+            if (!q->narrow) {
+                fprintf(stderr, "k3_bind_mem: %s is int8 but wanted as fp32\n", q->name);
+                return -1;
+            }
+            *q->dest = run + off;
+            i8_seen = 1;
+            continue;
         }
         const int esz = (dt == K3_DT_F32) ? 4 : (dt == K3_DT_U8 ? 1 : 2);
         const int64_t have = nb / esz;
@@ -377,14 +391,17 @@ int k3_bind_layer_mem(const K3Cfg *c, int L, K3LayerBind *b,
         w += (size_t)q->take * 4;
     }
 
-    if (!narrowed_all) {
+    if (!narrowed_all && !i8_seen) {
         /* A large matrix was not BF16 in the packed run. The tag is per struct, so this
          * cannot be described; refuse rather than read fp32 bytes as bf16. */
         fprintf(stderr, "k3_bind_mem: layer %d has a non-BF16 large tensor\n", L);
         return -1;
     }
 
-    b->kda.wdt = b->mla.wdt = b->moe.wdt = b->lay.wdt = K3_WBF16;
+    /* An int8 draft trunk has every matmul weight as I8R (norms stay f32), so one tag
+     * describes the layer. The two formats are never mixed within a packed trunk. */
+    const int lw = i8_seen ? K3_WI8 : K3_WBF16;
+    b->kda.wdt = b->mla.wdt = b->moe.wdt = b->lay.wdt = lw;
     b->lay.kda = is_mla ? NULL : &b->kda;
     b->lay.mla = is_mla ? &b->mla : NULL;
     b->lay.moe = is_dense ? NULL : &b->moe;

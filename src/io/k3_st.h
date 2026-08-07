@@ -30,7 +30,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
-typedef enum { K3_DT_UNKNOWN = 0, K3_DT_U8, K3_DT_BF16, K3_DT_F16, K3_DT_F32 } K3Dtype;
+/* K3_DT_I8R is the packed trunk's per-row int8 draft format: each row is [f32 scale]
+ * [int8 * cols]. It only ever appears in a draft trunk written by tools/int8_trunk.py. */
+typedef enum { K3_DT_UNKNOWN = 0, K3_DT_U8, K3_DT_BF16, K3_DT_F16, K3_DT_F32,
+               K3_DT_I8R } K3Dtype;
 
 typedef struct {
     char     *name;

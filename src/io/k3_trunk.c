@@ -62,6 +62,7 @@ static int dt_of(const char *s)
     if (!strcmp(s, "F32"))  return K3_DT_F32;
     if (!strcmp(s, "U8"))   return K3_DT_U8;
     if (!strcmp(s, "F16"))  return K3_DT_F16;
+    if (!strcmp(s, "I8R"))  return K3_DT_I8R;
     return K3_DT_UNKNOWN;
 }
 
