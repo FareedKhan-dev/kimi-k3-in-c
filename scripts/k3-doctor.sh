@@ -70,11 +70,15 @@ AVAIL_KB=$(awk '/MemAvailable/{print $2}' /proc/meminfo 2>/dev/null || echo 0)
 AVAIL_GB=$(( AVAIL_KB / 1024 / 1024 ))
 ok "total: ${MEM_GB} GB, available: ${AVAIL_GB} GB"
 
-# The preset boundaries follow the measured memory ladder; see docs/PERFORMANCE.md.
-if   [ "$AVAIL_GB" -ge 192 ]; then PRESET=server;      EXPECT="~19-21 s/token"
-elif [ "$AVAIL_GB" -ge  96 ]; then PRESET=workstation; EXPECT="~24 s/token"
-elif [ "$AVAIL_GB" -ge  32 ]; then PRESET=desktop;     EXPECT="~28-31 s/token"
-elif [ "$AVAIL_GB" -ge  10 ]; then PRESET=laptop;      EXPECT="~32 s/token"
+# Boundaries follow the measured memory ladder (docs/PERFORMANCE.md). Expectations are v1.0.0
+# anchors from docs/data/speed-2026-08.md on the reference box (124 cores, fast NVMe): treat
+# them as order-of-magnitude, not a promise. Streaming presets (laptop/desktop/workstation)
+# scale with your disk; the trunk becomes resident above ~128 GB, where decode is compute-bound
+# and scales with core count instead.
+if   [ "$AVAIL_GB" -ge 192 ]; then PRESET=server;      EXPECT="~6 s/token"
+elif [ "$AVAIL_GB" -ge  96 ]; then PRESET=workstation; EXPECT="~6-20 s/token"
+elif [ "$AVAIL_GB" -ge  32 ]; then PRESET=desktop;     EXPECT="~24 s/token"
+elif [ "$AVAIL_GB" -ge  10 ]; then PRESET=laptop;      EXPECT="~27 s/token"
 else PRESET=""; fi
 
 if [ -n "$PRESET" ]; then

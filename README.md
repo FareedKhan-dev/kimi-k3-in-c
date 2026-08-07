@@ -32,7 +32,7 @@
 <tr><td align="right">128 GB+</td><td align="right"><b>5.6</b></td><td>trunk fully resident, off the compute wall</td></tr>
 </table>
 
-<sub>Same 8-token prompt at every size, <b>byte-identical output</b>, one machine: 124-core x86-64, local NVMe. CPU-only, so core count and disk speed set the pace. What v1.0.0 changed, each measured on one machine with a single variable flipped: per-token compute <b>~8&times;</b> lower (fused kernels), a second conversation turn <b>3.9&times;</b> faster (persisted state), long prompts <b>~2&times;</b> cheaper (chunk-union prefill). Full data in <a href="docs/data/">docs/data/</a>.</sub>
+<sub>Same 8-token prompt at every size, <b>byte-identical output</b>, one machine: 124-core x86-64 with fast local NVMe. Below 128 GB the trunk streams, so those rows reflect this box's disk as much as the engine and are not a pure-code comparison; at 128 GB+ the trunk is resident and decode is compute-bound, where the drive drops out. (The two runnable demos just below are the original captures on a slower 3.2 GB/s drive, which is why their clock is a touch higher.) What v1.0.0 changed, each measured on one machine with a single variable flipped: per-token compute <b>~8&times;</b> lower (fused kernels), a second conversation turn <b>3.9&times;</b> faster (persisted state), long prompts <b>~2&times;</b> cheaper (chunk-union prefill). Full data in <a href="docs/data/">docs/data/</a>.</sub>
 
 <hr>
 
@@ -490,10 +490,10 @@ The boundaries come from the measured ladder, and the doctor keys on `MemAvailab
 than `MemTotal`:
 
 ```bash
-if   [ "$AVAIL_GB" -ge 192 ]; then PRESET=server;      EXPECT="~19-21 s/token"
-elif [ "$AVAIL_GB" -ge  96 ]; then PRESET=workstation; EXPECT="~24 s/token"
-elif [ "$AVAIL_GB" -ge  32 ]; then PRESET=desktop;     EXPECT="~28-31 s/token"
-elif [ "$AVAIL_GB" -ge  10 ]; then PRESET=laptop;      EXPECT="~32 s/token"
+if   [ "$AVAIL_GB" -ge 192 ]; then PRESET=server;      EXPECT="~6 s/token"
+elif [ "$AVAIL_GB" -ge  96 ]; then PRESET=workstation; EXPECT="~6-20 s/token"
+elif [ "$AVAIL_GB" -ge  32 ]; then PRESET=desktop;     EXPECT="~24 s/token"
+elif [ "$AVAIL_GB" -ge  10 ]; then PRESET=laptop;      EXPECT="~27 s/token"
 else PRESET=""; fi
 ```
 

@@ -36,6 +36,8 @@ on a clean clone, now works.
   explicitly fused products, taking the trunk matmul to its memory floor (about eight times
   less per-token compute) while keeping the scalar and AVX2 paths bitwise identical.
 - **KDA recurrence parallelised over heads**, bit-identical to the serial form.
+- `scripts/k3-doctor.sh` per-preset speed expectations refreshed to the v1.0.0 numbers, with
+  the streaming presets noted as disk-bound and the resident tier as compute-bound.
 
 ### Fixed
 
