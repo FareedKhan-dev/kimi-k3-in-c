@@ -95,8 +95,9 @@ endfunction()
 
 k3_add_test(test_ops    tests/unit/test_ops.c)
 k3_add_test(test_cache  tests/unit/test_cache.c)
-k3_add_test(test_st     tests/unit/test_st.c)
-k3_add_test(test_cfg    tests/unit/test_cfg.c)
+k3_add_test(test_st          tests/unit/test_st.c)
+k3_add_test(test_large_read  tests/unit/test_large_read.c)
+k3_add_test(test_cfg         tests/unit/test_cfg.c)
 k3_add_test(test_tok    tests/unit/test_tok.c)
 k3_add_test(scale_test  tests/unit/scale_test.c)
 k3_add_test(k3_model    tests/unit/k3_model.c)
@@ -124,6 +125,7 @@ add_test(NAME config_reject_bad_topk
          COMMAND test_cfg reject ${FIX}/cfg/bad_topk.json)
 add_test(NAME safetensors COMMAND test_st   ${FIX}/st ${CMAKE_CURRENT_BINARY_DIR}/idx.json
          plain.f32.2d plain.bf16.1d tricky.f16.1d packed.u8.2d scalar.f32 second.shard.f32)
+add_test(NAME large_read  COMMAND test_large_read ${CMAKE_CURRENT_BINARY_DIR}/large_read)
 
 # The tokenizer test needs the released vocabulary, which is not in this repository.
 # Registered UNCONDITIONALLY so ctest reports it as Skipped rather than omitting it:

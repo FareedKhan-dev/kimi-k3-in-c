@@ -22,6 +22,13 @@ access. Uses a synthetic shard of structurally faithful experts, a few KB.
 **`test_st`**, the safetensors reader: dtype widening, offsets, tail bytes, escaped
 tensor names, and a tensor deliberately containing non-finite values.
 
+**`test_large_read`**, reads above 2 GiB through `k3_st_read`: on macOS it checks that a
+single `pread` of 2 GiB is rejected with `EINVAL`, then verifies the chunked reader on a
+~2.06 GiB sparse file; on Linux it checks that the same single `pread` succeeds and
+`k3_st_read` still returns byte-exact data. Without the Darwin chunking fix the macOS
+full-span case fails the same way embed load did. Peak RSS during this test is about
+2.1 GB.
+
 **`test_cfg`**, the config reader against the fixture layout, plus three malformed configs
 in `tests/fixtures/cfg/` it must **refuse**: `no_layermap.json` (no `full_attn_layers` at
 all), `bad_layer_index.json` (a one-based index outside `1..n_layers`), and
