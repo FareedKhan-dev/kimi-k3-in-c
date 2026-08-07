@@ -34,6 +34,15 @@
 
 <sub>Same 8-token prompt at every size, <b>byte-identical output</b>, one machine: 124-core x86-64, local NVMe. CPU-only, so core count and disk speed set the pace. What v1.0.0 changed, each measured on one machine with a single variable flipped: per-token compute <b>~8&times;</b> lower (fused kernels), a second conversation turn <b>3.9&times;</b> faster (persisted state), long prompts <b>~2&times;</b> cheaper (chunk-union prefill). Full data in <a href="docs/data/">docs/data/</a>.</sub>
 
+<hr>
+
+<p>
+  <img src="docs/images/patrick_pray.png" height="44" align="middle" alt="">
+  <i>I am open to AI research roles and PhD positions. <a href="https://drive.google.com/file/d/1yW5xHDS6Mr9ByrkCgVve85OqF4UOPv9K/view?usp=sharing">CV</a>.</i>
+</p>
+
+<hr>
+
 </div>
 
 <br>
