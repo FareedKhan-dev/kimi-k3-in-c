@@ -641,16 +641,35 @@ size_t k3_moe_scratch(const K3Cfg *c)
  * out/x are [T][E], idx/wt scratch are topk-wide (reused per token), scratch is one
  * k3_moe_scratch. This path requires w->src (streamed); the resident path stays on
  * k3_moe, which is what the oracle gates exercise. */
+static void moe_prefill_chunk(float *out, const float *x, const K3MoeW *w,
+                              const K3Cfg *c, int T, float *scratch);
+
 void k3_moe_prefill(float *out, const float *x, const K3MoeW *w, const K3Cfg *c,
                     int T, int *idx, float *wt, float *scratch)
 {
-    const int E = c->hidden, Ll = c->latent, I = c->moe_inter;
-    const int SI = I * c->n_shared, K = c->topk;
-
     if (!w->src || T <= 1) {           /* nothing to batch; defer to the per-token path */
         k3_moe(out, x, w, c, T, idx, wt, scratch);
         return;
     }
+    /* Fixed sub-chunks bound the contribution buffer (14.7 MB at 64 tokens) no matter
+     * how long the prompt is; a 32k prefill would otherwise want 7.3 GB of it. Most of
+     * the dedup is already captured at this width: the unique-expert count grows far
+     * slower than the request count under near-uniform routing. */
+    const int CHUNK = 64;
+    for (int t0 = 0; t0 < T; t0 += CHUNK) {
+        const int n = (T - t0) < CHUNK ? (T - t0) : CHUNK;
+        if (n == 1) { k3_moe(out + (size_t)t0 * c->hidden, x + (size_t)t0 * c->hidden,
+                             w, c, 1, idx, wt, scratch); continue; }
+        moe_prefill_chunk(out + (size_t)t0 * c->hidden, x + (size_t)t0 * c->hidden,
+                          w, c, n, scratch);
+    }
+}
+
+static void moe_prefill_chunk(float *out, const float *x, const K3MoeW *w,
+                              const K3Cfg *c, int T, float *scratch)
+{
+    const int E = c->hidden, Ll = c->latent, I = c->moe_inter;
+    const int SI = I * c->n_shared, K = c->topk;
 
     /* Per-token routing decisions and latent inputs, plus a contribution buffer holding
      * every routed expert's latent output for every token: [T][K][Ll]. At T=32, K=16,
