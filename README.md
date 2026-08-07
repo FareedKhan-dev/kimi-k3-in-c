@@ -24,15 +24,42 @@
 </tr>
 </table>
 
+<p><b>The same 2.78-trillion-parameter model, the same answer, on whatever machine you own.</b><br>More memory only buys speed:</p>
+
 <table>
-<tr><th>resident RAM</th><th>v1.0.0 decode</th><th align="left">&nbsp;</th></tr>
-<tr><td align="right">8 GB</td><td align="right"><b>26.5 s/tok</b></td><td>the floor; the whole trunk streams every token</td></tr>
-<tr><td align="right">32 GB</td><td align="right"><b>24.2</b></td><td>part of the trunk pinned in RAM</td></tr>
-<tr><td align="right">64 GB</td><td align="right"><b>19.8</b></td><td>more of the trunk pinned</td></tr>
-<tr><td align="right">128 GB+</td><td align="right"><b>5.6</b></td><td>trunk fully resident, off the compute wall</td></tr>
+<tr>
+<th align="left">the machine you have</th>
+<th align="right">RAM</th>
+<th align="right">time per token</th>
+<th align="left">what is going on</th>
+</tr>
+<tr>
+<td align="left">an ordinary laptop</td>
+<td align="right">8 GB</td>
+<td align="right"><b>26.5 s</b></td>
+<td>the whole model streams off the disk on every step</td>
+</tr>
+<tr>
+<td align="left">a high-end laptop</td>
+<td align="right">32 GB</td>
+<td align="right"><b>24.2 s</b></td>
+<td>some of the model now sits in memory</td>
+</tr>
+<tr>
+<td align="left">a desktop</td>
+<td align="right">64 GB</td>
+<td align="right"><b>19.8 s</b></td>
+<td>more of it sits in memory</td>
+</tr>
+<tr>
+<td align="left">a heavy workstation</td>
+<td align="right">128 GB+</td>
+<td align="right"><b>5.6 s</b></td>
+<td>the model fits entirely in memory, the disk wait is gone</td>
+</tr>
 </table>
 
-<sub>Same 8-token prompt at every size, <b>byte-identical output</b>, one machine: 124-core x86-64 with fast local NVMe. Below 128 GB the trunk streams, so those rows reflect this box's disk as much as the engine and are not a pure-code comparison; at 128 GB+ the trunk is resident and decode is compute-bound, where the drive drops out. (The two runnable demos just below are the original captures on a slower 3.2 GB/s drive, which is why their clock is a touch higher.) What v1.0.0 changed, each measured on one machine with a single variable flipped: per-token compute <b>~8&times;</b> lower (fused kernels), a second conversation turn <b>3.9&times;</b> faster (persisted state), long prompts <b>~2&times;</b> cheaper (chunk-union prefill). Full data in <a href="docs/data/">docs/data/</a>.</sub>
+<sub>Same short prompt at every size, and the output is <b>byte-identical</b> from the smallest machine to the largest; only the clock changes. One machine, 124 cores, fast NVMe drive: the first three rows still read the model from disk each step, so a slower drive is slower there, while the 128 GB+ row keeps everything in memory and no longer waits on the disk. On that same machine v1.0.0 made the math per token about <b>8&times;</b> lighter, a follow-up question in a chat <b>3.9&times;</b> faster, and long prompts about <b>half</b> as costly. (A token is roughly a short word-piece; the two runnable demos below are the original captures on a slower drive, so their clock reads a little higher.) Full data in <a href="docs/data/">docs/data/</a>.</sub>
 
 <hr>
 
