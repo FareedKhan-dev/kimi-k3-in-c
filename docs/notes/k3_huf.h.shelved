@@ -1,0 +1,147 @@
+/* k3_huf.h - canonical Huffman decoder for the compressed packed trunk.
+ *
+ * WHY THIS EXISTS. The trunk is bf16, and bf16's high byte (sign + exponent) carries
+ * about 2.8 bits of real information: measured on the released checkpoint, roughly a
+ * dozen byte values cover 99.9% of all weights. Entropy-coding JUST that byte plane
+ * shrinks the packed trunk to ~67% of its size, which at streamed budgets converts
+ * directly into tokens per second, and the decoded bytes are the checkpoint's own bytes,
+ * so it costs nothing the engine cares about. The low (mantissa) byte plane measures as
+ * pure noise and is stored raw; LZ-family codecs were measured to decode an order of
+ * magnitude too slowly to keep up with the drive, which is why this is plain Huffman.
+ *
+ * SCOPE. Decode only. Encoding happens once, in tools/pack_trunk.py, at pack time.
+ *
+ * FORMAT (one compressed layer run, produced by pack_trunk.py --compress):
+ *   [K3HufLayerHdr]                      code lengths for the byte-plane alphabet
+ *   stripe 0: [K3HufStripeHdr][huffman bits of the ODD byte plane][EVEN bytes raw]
+ *   stripe 1: ...
+ * Each stripe covers up to K3_HUF_STRIPE bytes of RAW run data, split by byte parity:
+ * odd offsets (the bf16 high byte in little-endian) are Huffman-coded, even offsets are
+ * verbatim. Stripes decode independently, so decoding parallelises over them.
+ *
+ * The decoder is a single 12-bit table lookup per symbol: canonical codes are limited to
+ * K3_HUF_MAXLEN bits at pack time (the encoder flattens deeper trees), so one load gives
+ * both the symbol and its length. Longest-first canonical assignment matches the
+ * encoder's; change one and you must change the other.
+ */
+#ifndef K3_HUF_H
+#define K3_HUF_H
+
+#include <stdint.h>
+#include <string.h>
+
+#define K3_HUF_MAGIC   0x4655484bu   /* "KHUF" little-endian */
+#define K3_HUF_STRIPE  (64u << 20)   /* raw bytes covered per stripe */
+#define K3_HUF_MAXLEN  12            /* max code length; table is 1 << MAXLEN entries */
+
+typedef struct {
+    uint32_t magic;                  /* K3_HUF_MAGIC */
+    uint32_t version;                /* 1 */
+    uint64_t raw_bytes;              /* decoded size of the whole run */
+    uint32_t nstripes;
+    uint8_t  codelen[256];           /* canonical code length per symbol, 0 = absent */
+    uint32_t reserved[3];
+} K3HufLayerHdr;
+
+typedef struct {
+    uint32_t magic;                  /* K3_HUF_MAGIC ^ stripe index */
+    uint32_t raw_bytes;              /* raw bytes this stripe covers */
+    uint32_t huf_bytes;              /* size of the coded odd-plane bitstream */
+    uint32_t pad;                    /* alignment filler after the raw even bytes */
+} K3HufStripeHdr;
+
+typedef struct {
+    uint16_t sym_len[1 << K3_HUF_MAXLEN];   /* (symbol << 4) | code_length */
+} K3HufTable;
+
+/* Build the lookup table from canonical code lengths. Returns 0, or -1 on a malformed
+ * header (over-subscribed or empty code space), which callers must treat as a corrupt
+ * trunk rather than decoding garbage. */
+static int k3_huf_build(K3HufTable *t, const uint8_t codelen[256])
+{
+    uint32_t count[K3_HUF_MAXLEN + 1] = {0};
+    for (int s = 0; s < 256; s++) {
+        if (codelen[s] > K3_HUF_MAXLEN) return -1;
+        count[codelen[s]]++;
+    }
+    count[0] = 0;
+    /* Kraft check: exactly-full or under-full code space decodes deterministically;
+     * over-full is corruption. */
+    uint64_t space = 0;
+    for (int l = 1; l <= K3_HUF_MAXLEN; l++)
+        space += (uint64_t)count[l] << (K3_HUF_MAXLEN - l);
+    if (space > (1u << K3_HUF_MAXLEN) || space == 0) return -1;
+
+    /* canonical first-code per length, shortest codes first, symbol order within a
+     * length; matches the python encoder exactly */
+    uint32_t code = 0, first[K3_HUF_MAXLEN + 2];
+    for (int l = 1; l <= K3_HUF_MAXLEN; l++) {
+        first[l] = code;
+        code = (code + count[l]) << 1;
+    }
+    memset(t->sym_len, 0, sizeof t->sym_len);
+    uint32_t next[K3_HUF_MAXLEN + 1];
+    memcpy(next, first, sizeof next);
+    for (int s = 0; s < 256; s++) {
+        const int l = codelen[s];
+        if (!l) continue;
+        const uint32_t c = next[l]++;
+        /* every MAXLEN-bit word starting with this code maps to the symbol */
+        const uint32_t lo = c << (K3_HUF_MAXLEN - l);
+        const uint32_t n  = 1u << (K3_HUF_MAXLEN - l);
+        const uint16_t v  = (uint16_t)((s << 4) | l);
+        for (uint32_t i = 0; i < n; i++) t->sym_len[lo + i] = v;
+    }
+    return 0;
+}
+
+/* Decode `nsym` odd-plane bytes from `src` into out[1], out[3], out[5], ... while
+ * copying `neven` raw even bytes from `raw` into out[0], out[2], ...
+ * The bitstream is MSB-first. Returns 0, or -1 if the stream ends early or hits a
+ * zero-length table entry, both of which mean corruption. */
+static int k3_huf_decode_stripe(const K3HufTable *t,
+                                const uint8_t *src, uint32_t huf_bytes,
+                                const uint8_t *raw, uint32_t raw_even,
+                                uint8_t *out, uint32_t raw_total)
+{
+    const uint32_t nodd = raw_total - raw_even;
+    uint8_t *op = out + 1;                        /* odd offsets */
+
+    /* Bit accumulator held in the LOW `held` bits, MSB of the stream toward the top of
+     * that window. A peek left-aligns the top MAXLEN bits with one shift; the refill
+     * pulls whole bytes into the low end while there is room, so the common path does
+     * one refill per ~8 symbols rather than one per symbol. */
+    uint64_t acc = 0;
+    int held = 0;
+    uint32_t sp = 0;
+    const uint32_t MASK = (1u << K3_HUF_MAXLEN) - 1;
+
+    for (uint32_t i = 0; i < nodd; i++) {
+        if (held < K3_HUF_MAXLEN) {
+            while (held <= 56 && sp < huf_bytes) {
+                acc = (acc << 8) | src[sp++];
+                held += 8;
+            }
+            if (held < K3_HUF_MAXLEN && held <= 0) return -1;
+        }
+        /* top MAXLEN bits of the valid window */
+        const uint32_t idx = held >= K3_HUF_MAXLEN
+            ? (uint32_t)(acc >> (held - K3_HUF_MAXLEN)) & MASK
+            : (uint32_t)(acc << (K3_HUF_MAXLEN - held)) & MASK;
+        const uint16_t v = t->sym_len[idx];
+        const int l = v & 0xF;
+        if (!l || l > held) return -1;
+        held -= l;
+        acc &= (held < 64) ? (((uint64_t)1 << held) - 1) : ~(uint64_t)0;
+        *op = (uint8_t)(v >> 4);
+        op += 2;
+    }
+    /* even plane is verbatim */
+    {
+        uint8_t *ep = out;
+        for (uint32_t i = 0; i < raw_even; i++) { *ep = raw[i]; ep += 2; }
+    }
+    return 0;
+}
+
+#endif /* K3_HUF_H */

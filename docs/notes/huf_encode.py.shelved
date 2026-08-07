@@ -1,0 +1,162 @@
+#!/usr/bin/env python3
+"""huf_encode.py - reference canonical-Huffman encoder for the compressed trunk.
+
+Encodes a raw byte run the way src/io/k3_huf.h decodes it: split by byte parity, the odd
+(bf16 high) plane Huffman-coded with length-limited canonical codes, the even (mantissa)
+plane stored verbatim. This is the pack-time half; the engine only ever decodes.
+
+Length limiting to K3_HUF_MAXLEN uses the standard package-merge-free heuristic: build a
+normal Huffman tree, then if any code exceeds the limit, repeatedly move a leaf up and a
+short leaf down until all lengths fit and the Kraft sum is <= 1. For a ~12-symbol-heavy
+alphabet over 12 bits this effectively never triggers, but it must be correct when it does.
+"""
+import heapq
+import struct
+
+MAXLEN = 12
+MAGIC = 0x4655484B
+STRIPE = 64 << 20
+
+
+def code_lengths(freq):
+    """Canonical code lengths per symbol (0..255), length-limited to MAXLEN."""
+    present = [(f, s) for s, f in enumerate(freq) if f > 0]
+    if not present:
+        return [0] * 256
+    if len(present) == 1:
+        L = [0] * 256
+        L[present[0][1]] = 1
+        return L
+    # Huffman on (freq, tie, node); node is a frozenset of symbols
+    heap = [(f, i, (s,)) for i, (f, s) in enumerate(present)]
+    heapq.heapify(heap)
+    lengths = {s: 0 for _, s in present}
+    counter = len(present)
+    # standard: accumulate depth by merging
+    depth = {s: 0 for _, s in present}
+    while len(heap) > 1:
+        f1, _, n1 = heapq.heappop(heap)
+        f2, _, n2 = heapq.heappop(heap)
+        for s in n1 + n2:
+            depth[s] += 1
+        heapq.heappush(heap, (f1 + f2, counter, n1 + n2))
+        counter += 1
+    L = [0] * 256
+    for s, d in depth.items():
+        L[s] = d
+    # length-limit: if anything exceeds MAXLEN, flatten via Kraft adjustment
+    if max(L) > MAXLEN:
+        L = _limit(L, freq)
+    return L
+
+
+def _limit(L, freq):
+    """Force all code lengths <= MAXLEN while keeping Kraft sum <= 1 (BZip2-style)."""
+    lengths = [min(l, MAXLEN) if l > 0 else 0 for l in L]
+    # Kraft sum in units of 2^-MAXLEN
+    def kraft(ls):
+        return sum(1 << (MAXLEN - l) for l in ls if l > 0)
+    K = kraft(lengths)
+    full = 1 << MAXLEN
+    # if over-full, lengthen the cheapest (highest-freq shortest) codes
+    order = sorted((s for s in range(256) if lengths[s] > 0),
+                   key=lambda s: (lengths[s], -freq[s]))
+    i = 0
+    while K > full and i < len(order):
+        s = order[i]
+        if lengths[s] < MAXLEN:
+            K -= 1 << (MAXLEN - lengths[s])
+            lengths[s] += 1
+            K += 1 << (MAXLEN - lengths[s])
+        else:
+            i += 1
+    # if under-full we could shorten, but under-full still decodes correctly; leave it
+    return lengths
+
+
+def canonical_codes(L):
+    """(code, length) per symbol from lengths, canonical shortest-first."""
+    from collections import Counter
+    cnt = Counter(l for l in L if l > 0)
+    code = 0
+    first = {}
+    for l in range(1, MAXLEN + 1):
+        first[l] = code
+        code = (code + cnt.get(l, 0)) << 1
+    nxt = dict(first)
+    out = {}
+    for s in range(256):
+        if L[s]:
+            out[s] = (nxt[L[s]], L[s])
+            nxt[L[s]] += 1
+    return out
+
+
+def _pack_bits(codd: bytes, codes) -> bytes:
+    """MSB-first bit packing of the odd plane, vectorised. Emits the same bytes as the
+    scalar loop the C decoder inverts."""
+    import numpy as np
+    a = np.frombuffer(codd, dtype=np.uint8)
+    clen = np.zeros(256, np.int64)
+    ccode = np.zeros(256, np.int64)
+    for s, (c, l) in codes.items():
+        clen[s] = l
+        ccode[s] = c
+    lens = clen[a]
+    vals = ccode[a]
+    total = int(lens.sum())
+    # bit positions where each symbol starts
+    starts = np.empty(len(a), np.int64)
+    starts[0] = 0
+    np.cumsum(lens[:-1], out=starts[1:])
+    out = np.zeros((total + 7) // 8, np.uint8)
+    # scatter each code's bits; done per distinct length to stay vectorised
+    for L in np.unique(lens):
+        if L == 0:
+            continue
+        m = lens == L
+        st = starts[m]
+        vv = vals[m]
+        for b in range(int(L)):
+            bitpos = st + b
+            bit = (vv >> (int(L) - 1 - b)) & 1
+            byte_i = bitpos >> 3
+            shift = 7 - (bitpos & 7)
+            np.bitwise_or.at(out, byte_i, (bit << shift).astype(np.uint8))
+    return out.tobytes()
+
+
+def encode_run(data: bytes) -> bytes:
+    """Whole-run container: layer header + stripes."""
+    odd = data[1::2]
+    freq = [0] * 256
+    for b in odd:
+        freq[b] += 1
+    L = code_lengths(freq)
+    codes = canonical_codes(L)
+
+    hdr = struct.pack("<IIQI", MAGIC, 1, len(data), (len(data) + STRIPE - 1) // STRIPE)
+    hdr += bytes(L)
+    hdr += struct.pack("<III", 0, 0, 0)
+    out = bytearray(hdr)
+
+    n = len(data)
+    for si, s0 in enumerate(range(0, n, STRIPE)):
+        chunk = data[s0:s0 + STRIPE]
+        codd = chunk[1::2]
+        ceven = chunk[0::2]
+        bits = _pack_bits(codd, codes)
+        sh = struct.pack("<IIII", MAGIC ^ si, len(chunk), len(bits), 0)
+        out += sh
+        out += bytes(bits)
+        out += bytes(ceven)
+    return bytes(out)
+
+
+if __name__ == "__main__":
+    import sys
+    src = open(sys.argv[1], "rb").read()
+    enc = encode_run(src)
+    open(sys.argv[2], "wb").write(enc)
+    print("raw %d -> %d (%.3f, %.2fx)" % (len(src), len(enc), len(enc) / len(src),
+                                          len(src) / len(enc)))
