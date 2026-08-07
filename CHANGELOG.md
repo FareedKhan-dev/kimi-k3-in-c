@@ -5,6 +5,60 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-08-07
+
+Verified end to end on the full released checkpoint, and made substantially faster, with
+byte-identical output preserved at every step. The first-run experience, which was broken
+on a clean clone, now works.
+
+### Added
+
+- **`--preset auto`**: sizes the trunk and expert-cache budgets from the machine's own free
+  RAM, trunk-first, so a user need not pick a preset by hand. A gigabyte given to the trunk
+  is worth far more than a gigabyte of expert cache, and auto pins accordingly, capping the
+  pin below the RAM ceiling after a heavy-pin regression was measured.
+- **Chunk-union prefill**: a batched-prefill MoE that fetches each unique routed expert once
+  per chunk instead of once per token, measured to read about half the expert bytes on a
+  prompt, with the generated token bit-identical to the per-token path.
+- **Conversation resume** (`--save-state` / `--load-state`): carries the recurrent state and
+  KV cache to disk so a second turn resumes instead of re-reading the whole prompt, measured
+  3.9x faster on turn two with identical output. Refuses to restore state from a different
+  architecture.
+- **`--spec N`**: speculative decode by n-gram drafting with batched greedy verification;
+  output is exactly the serial greedy decode by construction.
+- `--tf-check`, teacher-forced agreement over an id sequence in one sweep, for measuring
+  draft quality; `tools/qdq_trunk.py` and `tools/int8_trunk.py` for deriving quantized
+  trunks.
+
+### Changed
+
+- **Fused matmul kernels** (fp32, bf16, MXFP4): sixteen partitioned accumulators with
+  explicitly fused products, taking the trunk matmul to its memory floor (about eight times
+  less per-token compute) while keeping the scalar and AVX2 paths bitwise identical.
+- **KDA recurrence parallelised over heads**, bit-identical to the serial form.
+
+### Fixed
+
+- All shell scripts are committed executable; the first documented command no longer fails
+  with Permission denied on a clean clone.
+- `scripts/download-model.sh` uses the current `hf` CLI and pins an immutable revision with
+  checksum verification; it no longer attempts a pip install that cannot succeed on the
+  target OS, and refuses to start without free space for the checkpoint.
+- `scripts/k3-doctor.sh` no longer fails a machine that can build and test the engine; the
+  memory floor is a warning about running the checkpoint, not a hard stop.
+- The config-refusal fixtures the docs describe now exist and are gated in `make test`,
+  ctest and CI; the tokenizer leg reports NOT RUN rather than passing silently; CI runs
+  `make test` rather than a hand-picked subset.
+- A silent-corruption path in the MLA KV overflow and one in the single-slot trunk reader,
+  both of which could emit a plausible wrong token, now abort or are prevented.
+- The MXFP4 packer alignment and the tiny-checkpoint scale rule.
+
+### Research notes, not shipped as features
+
+- Lossless trunk compression and a quantized-self-draft hybrid were both built and measured,
+  and both turned out to help only narrow regimes. The findings and prototypes are kept in
+  [`docs/notes/`](docs/notes/).
+
 ## [0.1.0] - 2026-07-31
 
 First public release.
@@ -45,5 +99,6 @@ First public release.
 
 See [docs/ROADMAP.md](docs/ROADMAP.md).
 
-[Unreleased]: https://github.com/FareedKhan-dev/kimi-k3-in-c/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/FareedKhan-dev/kimi-k3-in-c/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/FareedKhan-dev/kimi-k3-in-c/compare/v0.1.0...v1.0.0
 [0.1.0]: https://github.com/FareedKhan-dev/kimi-k3-in-c/releases/tag/v0.1.0

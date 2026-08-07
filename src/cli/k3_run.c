@@ -303,7 +303,7 @@ static int spec_draft(const int *seq, int T, int cap, int *out)
 }
 
 #ifndef K3_VERSION
-#define K3_VERSION "0.1.0"
+#define K3_VERSION "1.0.0"
 #endif
 
 static void usage(FILE *f)
