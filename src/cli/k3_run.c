@@ -123,6 +123,42 @@ static int real_cfg(K3Cfg *c, int *fa, int fa_max,
 static int argmax_(const float *v, int n)
 { int b = 0; for (int i = 1; i < n; i++) if (v[i] > v[b]) b = i; return b; }
 
+/* ------------------------------------------------------- conversation state ----
+ * Everything the engine carries between tokens, on disk. The point is turn two of a
+ * conversation: without this, resuming re-reads the whole prompt through all 93 layers,
+ * which on a streamed trunk costs minutes; with it, a resumed session pays only for the
+ * tokens actually new.
+ *
+ * Three things are carried, and only three: the KDA recurrent matrices plus ShortConv
+ * history (fixed size, independent of context), the MLA KV cache, and the shared rope
+ * rows. The AttnRes block buffer is NOT carried because forward() clears it on entry and
+ * rebuilds it from the layer outputs every pass; saving it would be saving scratch.
+ *
+ * The KV cache is stored position-major inside each MLA layer's slice, so only the
+ * OCCUPIED positions are written and a resumed run may size its cache differently. The
+ * header carries a config fingerprint: restoring state built by a different architecture
+ * would produce fluent, wrong output with nothing to indicate it, which is the one
+ * failure mode this engine refuses to have. */
+#define K3_STATE_MAGIC "K3ST"
+#define K3_STATE_VER   1
+
+typedef struct {
+    char    magic[4];
+    int32_t version;
+    int32_t fp[12];        /* config fingerprint */
+    int32_t n_bound, n_mla, cached, nseq;
+    int64_t kper;          /* KDA+conv floats per layer */
+    int64_t kvpp, ropepp;  /* KV / rope floats per position, per MLA layer */
+} K3StateHdr;
+
+static void k3_state_fp(const K3Cfg *c, int32_t *fp)
+{
+    fp[0] = c->hidden;      fp[1] = c->n_layers;  fp[2]  = c->vocab;
+    fp[3] = c->kda_heads;   fp[4] = c->kda_head_dim; fp[5] = c->conv_k;
+    fp[6] = c->n_heads;     fp[7] = c->qk_nope;   fp[8]  = c->qk_rope;
+    fp[9] = c->v_head;      fp[10] = c->n_experts; fp[11] = c->topk;
+}
+
 #define K3_SPEC_MAX 8
 /* Longest-suffix n-gram drafting for --spec: if the last n ids (n=3, then 2) already
  * appeared earlier in the sequence, propose the ids that followed them there. Costs
@@ -130,6 +166,107 @@ static int argmax_(const float *v, int n)
  * drafts are PROPOSALS only; batched greedy verification accepts precisely the prefix
  * the model itself would have emitted, so the output stream is identical to serial
  * decode by construction, and the A/B gate checks it. */
+/* Reads only the header, so the caller can size buffers before committing to a load. */
+static int k3_state_peek(const char *path, K3StateHdr *hd)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) { perror(path); return -1; }
+    const size_t got = fread(hd, 1, sizeof *hd, f);
+    fclose(f);
+    if (got != sizeof *hd || memcmp(hd->magic, K3_STATE_MAGIC, 4) != 0) {
+        fprintf(stderr, "%s is not a k3 state file\n", path);
+        return -1;
+    }
+    if (hd->version != K3_STATE_VER) {
+        fprintf(stderr, "%s is state version %d, this build writes %d\n",
+                path, hd->version, K3_STATE_VER);
+        return -1;
+    }
+    return 0;
+}
+
+static int k3_state_load(const char *path, const K3Cfg *c, const K3StateHdr *hd,
+                         int *seq, float *ks, float *kvc, float *ropec,
+                         int n_bound, int n_mla, int kv_cap)
+{
+    int32_t fp[12];
+    k3_state_fp(c, fp);
+    if (memcmp(fp, hd->fp, sizeof fp) != 0) {
+        fprintf(stderr, "REFUSING: %s was written by a different model architecture.\n"
+                        "  Restoring it would produce fluent, wrong output.\n", path);
+        return -1;
+    }
+    if (hd->n_bound != n_bound || hd->n_mla != n_mla) {
+        fprintf(stderr, "REFUSING: %s holds %d bound layers and %d MLA layers, "
+                        "this run has %d and %d\n",
+                path, hd->n_bound, hd->n_mla, n_bound, n_mla);
+        return -1;
+    }
+    if (hd->cached > kv_cap) {
+        fprintf(stderr, "REFUSING: %s holds %d positions, this run's KV cache is %d.\n"
+                        "  Raise --gen or shorten the prompt.\n", path, hd->cached, kv_cap);
+        return -1;
+    }
+    FILE *f = fopen(path, "rb");
+    if (!f) { perror(path); return -1; }
+    if (fseek(f, (long)sizeof *hd, SEEK_SET) != 0) { fclose(f); return -1; }
+
+    int rc = 0;
+    if (fread(seq, sizeof(int), (size_t)hd->nseq, f) != (size_t)hd->nseq) rc = -1;
+    if (!rc && fread(ks, sizeof(float), (size_t)hd->kper * n_bound, f)
+               != (size_t)hd->kper * (size_t)n_bound) rc = -1;
+    /* Position-major inside each layer slice, so a differently-sized destination cache
+     * is written slice by slice rather than as one block. */
+    for (int mi = 0; !rc && mi < n_mla; mi++) {
+        float *dst = kvc + (size_t)mi * kv_cap * hd->kvpp;
+        const size_t n = (size_t)hd->cached * hd->kvpp;
+        if (fread(dst, sizeof(float), n, f) != n) rc = -1;
+    }
+    for (int mi = 0; !rc && mi < n_mla; mi++) {
+        float *dst = ropec + (size_t)mi * kv_cap * hd->ropepp;
+        const size_t n = (size_t)hd->cached * hd->ropepp;
+        if (fread(dst, sizeof(float), n, f) != n) rc = -1;
+    }
+    fclose(f);
+    if (rc) fprintf(stderr, "%s is truncated\n", path);
+    return rc;
+}
+
+static int k3_state_save(const char *path, const K3Cfg *c, const int *seq, int nseq,
+                         const float *ks, const float *kvc, const float *ropec,
+                         int n_bound, int n_mla, int kv_cap, int cached,
+                         int64_t kper, int64_t kvpp, int64_t ropepp)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f) { perror(path); return -1; }
+    K3StateHdr hd;
+    memset(&hd, 0, sizeof hd);
+    memcpy(hd.magic, K3_STATE_MAGIC, 4);
+    hd.version = K3_STATE_VER;
+    k3_state_fp(c, hd.fp);
+    hd.n_bound = n_bound; hd.n_mla = n_mla; hd.cached = cached; hd.nseq = nseq;
+    hd.kper = kper; hd.kvpp = kvpp; hd.ropepp = ropepp;
+
+    int rc = 0;
+    if (fwrite(&hd, sizeof hd, 1, f) != 1) rc = -1;
+    if (!rc && fwrite(seq, sizeof(int), (size_t)nseq, f) != (size_t)nseq) rc = -1;
+    if (!rc && fwrite(ks, sizeof(float), (size_t)kper * n_bound, f)
+               != (size_t)kper * (size_t)n_bound) rc = -1;
+    for (int mi = 0; !rc && mi < n_mla; mi++) {
+        const float *src = kvc + (size_t)mi * kv_cap * kvpp;
+        const size_t n = (size_t)cached * kvpp;
+        if (fwrite(src, sizeof(float), n, f) != n) rc = -1;
+    }
+    for (int mi = 0; !rc && mi < n_mla; mi++) {
+        const float *src = ropec + (size_t)mi * kv_cap * ropepp;
+        const size_t n = (size_t)cached * ropepp;
+        if (fwrite(src, sizeof(float), n, f) != n) rc = -1;
+    }
+    if (fclose(f) != 0) rc = -1;
+    if (rc) fprintf(stderr, "failed writing %s\n", path);
+    return rc;
+}
+
 static int spec_draft(const int *seq, int T, int cap, int *out)
 {
     /* Evidence-gated: a draft only fires when the suffix n-gram's occurrences AGREE on
@@ -194,6 +331,10 @@ static void usage(FILE *f)
 "generation:\n"
 "  --gen N               tokens to generate (default 8)\n"
 "  --incremental         carry KV cache and recurrent state between tokens\n"
+"  --save-state PATH     write the carried state after the run, so the next turn of a\n"
+"                        conversation resumes instead of re-reading the whole prompt\n"
+"  --load-state PATH     resume from a saved state; the prompt given now is treated as\n"
+"                        the CONTINUATION of the saved sequence. Needs --incremental\n"
 "  --draft-trunk DIR     hybrid decode: a second packed trunk (typically a quantized\n"
 "                        derivation of the real one, see tools/qdq_trunk.py) DRAFTS\n"
 "                        tokens which the exact model verifies in batched sweeps.\n"
@@ -439,6 +580,7 @@ int main(int argc, char **argv)
     int tf_check = 0;
     const char *draft_dir = NULL;
     double draft_gb = 6.0;
+    const char *load_state = NULL, *save_state = NULL;
     const char *preset_name = NULL;
     int incremental = 0;
     for (int i = 2; i < argc; i++) {
@@ -454,6 +596,8 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--trunk") && i + 1 < argc) trunk_dir = argv[++i];
         else if (!strcmp(argv[i], "--spec") && i + 1 < argc) spec_n = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--tf-check")) tf_check = 1;
+        else if (!strcmp(argv[i], "--load-state") && i + 1 < argc) load_state = argv[++i];
+        else if (!strcmp(argv[i], "--save-state") && i + 1 < argc) save_state = argv[++i];
         else if (!strcmp(argv[i], "--draft-trunk") && i + 1 < argc) draft_dir = argv[++i];
         else if (!strcmp(argv[i], "--draft-trunk-gb") && i + 1 < argc) draft_gb = atof(argv[++i]);
         else if (!strcmp(argv[i], "--trunk-gb") && i + 1 < argc) {
@@ -827,8 +971,22 @@ int main(int argc, char **argv)
            (double)cache.nslot * cache.slot_bytes / 1e9,
            100.0 * cache.nslot / (double)(92 * c.n_experts));
 
-    /* ---- buffers ---- */
-    const int Tmax = np + gen + 1;
+    /* ---- buffers ----
+     * A resumed session must hold the saved history as well as the new tokens, so the
+     * KV cache and every per-position buffer are sized for both. The header is read
+     * here, before anything is allocated; the payload is restored after. */
+    K3StateHdr shd;
+    int prior = 0;
+    if (load_state) {
+        if (!incremental) {
+            fprintf(stderr, "--load-state needs --incremental\n");
+            return 2;
+        }
+        if (k3_state_peek(load_state, &shd) != 0) return 1;
+        prior = shd.nseq;
+        printf("resuming from %s: %d prior positions, %d new\n\n", load_state, prior, np);
+    }
+    const int Tmax = prior + np + gen + 1;
     const int E = c.hidden;
     const int maxb = c.n_layers / c.attn_res_block + 2;
     const int P = c.kda_heads * c.kda_head_dim;
@@ -868,11 +1026,13 @@ int main(int argc, char **argv)
      * Heap and sized from the ACTUAL request, not from the ceiling. These were
      * `int seq[K3_MAX_PROMPT + K3_MAX_GEN]` and `int outtok[K3_MAX_GEN]` on the stack,
      * which is why the ceiling had to stay small enough to be a stack array. */
-    int *seq = (int *)malloc((size_t)(np + gen + 8) * sizeof(int));
+    int *seq = (int *)malloc((size_t)(prior + np + gen + 8) * sizeof(int));
     int *outtok = (int *)malloc((size_t)(gen + 8) * sizeof(int));
     if (!seq || !outtok) { fprintf(stderr, "OOM allocating sequence buffers\n"); return 1; }
-    memcpy(seq, prompt, (size_t)np * sizeof(int));
-    int T = np;
+    /* On a resume the saved history occupies the front of the sequence and the prompt
+     * given now is its continuation; the restore below fills seq[0..prior). */
+    memcpy(seq + prior, prompt, (size_t)np * sizeof(int));
+    int T = prior + np;
     int nout = 0;
 
     /* ---- optional incremental decode ----
@@ -899,6 +1059,16 @@ int main(int argc, char **argv)
         if (!w.kvc || !w.ropec) { fprintf(stderr, "KV cache allocation failed\n"); return 1; }
         memset(ks, 0, kper * (size_t)NL * sizeof(float));
         w.cached = 0;
+
+        if (load_state) {
+            const double tl = now_s();
+            if (k3_state_load(load_state, &c, &shd, seq, ks, w.kvc, w.ropec,
+                              w.n_bound, w.n_mla, w.kv_cap) != 0)
+                return 1;
+            w.cached = shd.cached;
+            printf("restored %d positions in %.2f s: decode continues without "
+                   "re-reading the prior context\n\n", w.cached, now_s() - tl);
+        }
     }
 
     /* --spec needs a snapshot of the carried KDA/ShortConv state to roll back a
@@ -1162,6 +1332,26 @@ int main(int argc, char **argv)
         }
         if (T >= Tmax) break;
     }
+    if (save_state) {
+        if (!incremental) {
+            fprintf(stderr, "--save-state needs --incremental; nothing written\n");
+        } else {
+            const double tsv = now_s();
+            const int64_t kvpp   = (int64_t)c.n_heads * (c.qk_nope + c.v_head);
+            const int64_t ropepp = (int64_t)c.qk_rope;
+            if (k3_state_save(save_state, &c, seq, T, ks, w.kvc, w.ropec,
+                              w.n_bound, w.n_mla, w.kv_cap, w.cached,
+                              (int64_t)kper, kvpp, ropepp) == 0) {
+                const double bytes = (double)sizeof(K3StateHdr) + (double)T * sizeof(int)
+                    + (double)kper * w.n_bound * sizeof(float)
+                    + (double)w.cached * (kvpp + ropepp) * w.n_mla * sizeof(float);
+                char sb[32]; human(bytes, sb, sizeof sb);
+                printf("wrote %s (%s, %d positions) in %.2f s\n",
+                       save_state, sb, w.cached, now_s() - tsv);
+            }
+        }
+    }
+
     if (dw.trunk && hyb_rounds > 0) {
         printf("\nhybrid decode: %ld rounds, %ld drafted, %ld accepted (%.1f%%), "
                "mean accepted run %.2f\n",
