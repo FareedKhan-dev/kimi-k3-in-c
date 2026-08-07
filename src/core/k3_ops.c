@@ -647,7 +647,11 @@ static void moe_prefill_chunk(float *out, const float *x, const K3MoeW *w,
 void k3_moe_prefill(float *out, const float *x, const K3MoeW *w, const K3Cfg *c,
                     int T, int *idx, float *wt, float *scratch)
 {
-    if (!w->src || T <= 1) {           /* nothing to batch; defer to the per-token path */
+    /* K3_NO_BATCH_PREFILL forces the per-token path, so one binary can produce both the
+     * batched and the reference token streams for a bit-identity A/B. */
+    static int no_batch = -1;
+    if (no_batch < 0) no_batch = getenv("K3_NO_BATCH_PREFILL") ? 1 : 0;
+    if (!w->src || T <= 1 || no_batch) { /* nothing to batch; defer to the per-token path */
         k3_moe(out, x, w, c, T, idx, wt, scratch);
         return;
     }
