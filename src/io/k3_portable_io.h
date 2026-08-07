@@ -29,6 +29,10 @@
 
 #if defined(__APPLE__)
 
+/* Darwin rejects a single pread above ~1 GiB with EINVAL. embed_tokens, lm_head and
+ * trunk layer 0 are ~2.3 GiB each; k3_st_read and k3_trunk cap each syscall. */
+#define K3_IO_READ_CHUNK (64 << 20)
+
 /* Not an open() flag on Darwin: defining it to 0 leaves open() semantics untouched. */
 #ifndef O_DIRECT
 #define O_DIRECT 0

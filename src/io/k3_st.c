@@ -500,8 +500,13 @@ int64_t k3_st_read(const K3St *s, const K3Tensor *t, void *buf)
      * call the streaming tier will make per expert: a 17.55 MB contiguous span. */
     int64_t got = 0;
     while (got < t->nbytes) {
-        ssize_t r = pread(s->fd[t->shard], (char *)buf + got,
-                          (size_t)(t->nbytes - got), (off_t)(t->off + got));
+        const int64_t left = t->nbytes - got;
+#if defined(__APPLE__)
+        const size_t chunk = (size_t)(left < K3_IO_READ_CHUNK ? left : K3_IO_READ_CHUNK);
+#else
+        const size_t chunk = (size_t)left;
+#endif
+        ssize_t r = pread(s->fd[t->shard], (char *)buf + got, chunk, (off_t)(t->off + got));
         if (r <= 0) {
             fprintf(stderr, "k3_st: short read on %s at +%lld\n", t->name, (long long)got);
             return got;

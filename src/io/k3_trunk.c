@@ -389,8 +389,13 @@ static int load_run(K3Trunk *tr, int L, unsigned char *dst)
     const double t0 = now_s();
     int64_t got = 0;
     while (got < lay->nbytes) {
-        ssize_t r = pread(tr->fd, dst + got, (size_t)(lay->nbytes - got),
-                          (off_t)(lay->file_off + got));
+        const int64_t left = lay->nbytes - got;
+#if defined(__APPLE__)
+        const size_t chunk = (size_t)(left < K3_IO_READ_CHUNK ? left : K3_IO_READ_CHUNK);
+#else
+        const size_t chunk = (size_t)left;
+#endif
+        ssize_t r = pread(tr->fd, dst + got, chunk, (off_t)(lay->file_off + got));
         if (r <= 0) { fprintf(stderr, "k3_trunk: short read on layer %d\n", L); return -1; }
         got += r;
     }
