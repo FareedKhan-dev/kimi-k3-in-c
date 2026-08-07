@@ -1192,15 +1192,25 @@ int main(int argc, char **argv)
         int emit[K3_SPEC_MAX + 1];
         int emitn = 0;
         if (incremental && g == 0) {
-            /* step 0 feeds the whole prompt */
+            /* Step 0 feeds everything not yet consumed: the whole prompt on a fresh
+             * run, and on a resume the carried pending token PLUS the new prompt.
+             * T - base covers both exactly; feeding np here instead dropped the last
+             * new token from a resumed batch, and the first generated token then came
+             * from a context one token short: fluent, plausible, and wrong. */
             const int base = w.cached;
-            frc = forward(&w, &c, &cache, seq + base, np, lg, sc, h, br, ks, NULL);
-            if (frc == 0) { w.cached = base + np; emit[emitn++] = argmax_(lg, c.vocab); }
-            /* the draft model must absorb the prompt too, or its first proposals come
-             * from an empty context; one draft sweep, paid once */
+            const int nT0 = T - base;
+            frc = forward(&w, &c, &cache, seq + base, nT0, lg, sc, h, br, ks, NULL);
+            if (frc == 0) { w.cached = base + nT0; emit[emitn++] = argmax_(lg, c.vocab); }
+            /* The draft model must absorb the same context, or its first proposals
+             * come from a shorter one; one draft sweep, paid once. Saved state does
+             * not include the draft's, so a resumed run replays the WHOLE sequence
+             * through the draft once; correctness never depends on this, only
+             * acceptance does. */
             if (dw.trunk && frc == 0) {
-                if (forward(&dw, &c, &cache, seq, np, lg, sc, h, br, dks, NULL) == 0)
-                    dw.cached = np;
+                const int db = load_state ? 0 : base;
+                if (forward(&dw, &c, &cache, seq + db, base + nT0 - db, lg, sc, h, br,
+                            dks, NULL) == 0)
+                    dw.cached = base + nT0;
                 else frc = -1;
             }
         } else if (incremental) {
