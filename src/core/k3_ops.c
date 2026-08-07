@@ -1104,6 +1104,61 @@ void k3_matmul_bf16(float *y, const float *x, const uint16_t *W, int in, int out
     }
 }
 
+/* Per-row int8 matmul for the draft model: each row is [f32 scale][int8 * in]. The int8
+ * weights are widened to float, dotted with the fp32 activation, and the row's scale is
+ * applied once at the end. Unlike the trunk kernels this carries NO cross-path
+ * determinism contract (K3_WI8 is draft-only, and the exact model decides every emitted
+ * token), so it accumulates in float with fused products and the natural AVX2 reduction,
+ * which is what makes it fast. */
+void k3_matmul_q8(float *y, const float *x, const void *W, int in, int out)
+{
+    const unsigned char *base = (const unsigned char *)W;
+    const size_t rowb = (size_t)4 + (size_t)in;
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if (out > 64)
+#endif
+    for (int o = 0; o < out; o++) {
+        const unsigned char *row = base + (size_t)o * rowb;
+        float scale;
+        memcpy(&scale, row, 4);
+        const int8_t *w = (const int8_t *)(row + 4);
+        int i = 0;
+        float acc;
+#if defined(__AVX2__)
+        {
+            __m256 v0 = _mm256_setzero_ps(), v1 = _mm256_setzero_ps();
+            for (; i + 15 < in; i += 16) {
+                const __m128i b0 = _mm_loadl_epi64((const __m128i *)(w + i));
+                const __m128i b1 = _mm_loadl_epi64((const __m128i *)(w + i + 8));
+                v0 = _mm256_fmadd_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(b0)),
+                                     _mm256_loadu_ps(x + i), v0);
+                v1 = _mm256_fmadd_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(b1)),
+                                     _mm256_loadu_ps(x + i + 8), v1);
+            }
+            __m256 vs = _mm256_add_ps(v0, v1);
+            __m128 lo = _mm_add_ps(_mm256_castps256_ps128(vs),
+                                   _mm256_extractf128_ps(vs, 1));
+            lo = _mm_add_ps(lo, _mm_movehl_ps(lo, lo));
+            lo = _mm_add_ss(lo, _mm_shuffle_ps(lo, lo, 1));
+            acc = _mm_cvtss_f32(lo);
+        }
+#else
+        {
+            float a0 = 0, a1 = 0, a2 = 0, a3 = 0;
+            for (; i + 3 < in; i += 4) {
+                a0 += (float)w[i]     * x[i];
+                a1 += (float)w[i + 1] * x[i + 1];
+                a2 += (float)w[i + 2] * x[i + 2];
+                a3 += (float)w[i + 3] * x[i + 3];
+            }
+            acc = (a0 + a1) + (a2 + a3);
+        }
+#endif
+        for (; i < in; i++) acc += (float)w[i] * x[i];
+        y[o] = acc * scale;
+    }
+}
+
 /* A whole BYTE to its two E2M1 values, so the inner loop does one 8-byte load instead
  * of masking, shifting and two separate lookups. 2 KB, built once, shared by all
  * threads after initialisation. */
