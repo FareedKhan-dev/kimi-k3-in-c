@@ -43,9 +43,36 @@ inline per-row scheme should match the qdq measurement), run the hybrid resident
 the proof NVMe). Output identity against the exact greedy run is the correctness gate and is
 already structural.
 
-## Expected
+## Built, and what it measured
 
-56.7 GB resident draft, decode drafting at RAM speed while the streamed bf16 verify amortises
-across accepted tokens. On the 64 GB band this is the difference between the hybrid being a
-proven idea and a measured 1.4-1.6x, bit-exact. It is a contained kernel-plus-format job, not
-a research risk; it is deferred here only to keep this change set shippable and reviewed.
+The container is built and works: `k3_matmul_q8` (unit-tested at rel-L2 0.37% vs fp32),
+`tools/int8_trunk.py` (produces a 54.47 GB container, half the bf16 trunk), the K3_DT_I8R
+dtype and the bind wiring (matmul weights pointed at directly and tagged K3_WI8; tensors read
+elementwise as fp32, like the AttnRes projection, dequantised into the widen buffer). The
+draft trunk loads, is resident (66 GB RSS on a 64 GB cap), and produces byte-identical output.
+Its teacher-forced agreement measured 90.9% on a 22-token sample, in the same band as the qdq
+simulator, and on one prompt the exact model accepted 100% of drafts (mean run 4.0).
+
+But the resident hybrid measured 53 s/token against 19.8 for exact decode at the same 64 GB.
+The reason is a real one and it is the important finding: **making the TRUNK resident does not
+make a draft step cheap, because the draft still streams the routed EXPERTS.** The experts are
+MXFP4 and 1.45 TB; they can never be resident, so every drafted token still reads ~25.8 GB of
+experts, the same as a real decode step. A draft that costs as much as the thing it drafts for
+cannot amortise anything. Splitting a 64 GB machine 56/2.5 between draft and exact also starved
+the exact model's trunk budget, so its verify sweeps streamed the full bf16 trunk.
+
+## What actually makes the hybrid pay
+
+The missing piece is a CHEAP draft on the expert side, so a proposal costs far less than a real
+step. Two routes, both identity-safe because the draft only proposes:
+
+- **cache-only routing:** the draft routes only among experts already resident in the cache,
+  reading zero new expert bytes per draft token. The exact verify still uses true routing.
+- **top-k reduction:** the draft uses top-4 of 896 instead of top-16, cutting draft expert
+  reads 4x.
+
+With either, a draft token costs a fraction of a real one, the resident int8 trunk carries the
+draft's dense compute, and the batched bf16 verify amortises across accepted tokens. That is the
+configuration where the 90.9% agreement and 100% acceptance measured here turn into a real
+speedup. The container and kernel built here are the reusable half; the draft-expert reduction is
+the next step, and it is a small change to the draft's routing call, not another format.
