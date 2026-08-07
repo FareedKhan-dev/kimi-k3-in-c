@@ -453,6 +453,7 @@ typedef struct {
     float       *kvc, *ropec;
     int         *mla_slot;   /* [n_layers] -> dense MLA index, or -1 */
     int          n_mla, kv_cap, cached;
+    int          draft_mode;   /* 1 for the hybrid draft: cache-only expert routing */
 } Weights;
 
 /* One full forward over T tokens, writing logits for the LAST position only. Every
@@ -500,6 +501,9 @@ static int forward(Weights *w, const K3Cfg *c, K3Cache *cache, const int *ids, i
         if (w->lay[L].lay.moe) {
             w->lay[L].moe.src = &cache->src;
             w->lay[L].moe.layer = L;
+            /* The draft routes only among resident experts, reading zero new expert bytes;
+             * the exact model keeps true routing. This is what makes a draft step cheap. */
+            w->lay[L].moe.cache_only = w->draft_mode;
         }
         if (w->kvc && w->mla_slot[L] >= 0) {
             const size_t kvper = (size_t)w->kv_cap * c->n_heads * (c->qk_nope + c->v_head);
@@ -1135,6 +1139,7 @@ int main(int argc, char **argv)
             dw.n_mla = w.n_mla;
             dw.kv_cap = w.kv_cap;
             dw.cached = 0;
+            dw.draft_mode = 1;   /* cache-only routing: draft tokens read no new experts */
             printf("hybrid decode: draft trunk %s (%.1f GB budget) proposes up to %d "
                    "tokens per sweep;\n               the exact model verifies every one "
                    "before it is emitted\n\n", draft_dir, draft_gb, spec_n);

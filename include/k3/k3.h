@@ -347,6 +347,10 @@ typedef struct K3ExpertSrc {
      * ZERO THIS FIELD. It is a function pointer in a struct that callers build on the
      * stack; an uninitialised one is a jump to garbage. See the warning below. */
     int (*getmany)(struct K3ExpertSrc *self, int layer, const int *experts, int n);
+    /* OPTIONAL: 1 if the expert is already resident (get() would read no disk), filling
+     * out when non-NULL. The draft model's cache-only routing uses this to propose tokens
+     * with zero expert I/O. May be NULL; callers must cope. */
+    int (*resident)(struct K3ExpertSrc *self, int layer, int expert, K3ExpertQ *out);
     void *ctx;
 } K3ExpertSrc;
 
@@ -368,6 +372,11 @@ typedef struct {
      * zero, so every existing caller keeps the resident path unchanged. */
     struct K3ExpertSrc *src;
     int          layer;
+    /* Draft-only: when 1, route among ONLY the experts already resident in the cache and
+     * renormalise the combining weights over them, so a draft token reads zero new expert
+     * bytes. Never set on the exact model, whose output is authoritative; the draft merely
+     * proposes and the exact model verifies. */
+    int          cache_only;
 } K3MoeW;
 
 size_t k3_moe_scratch(const K3Cfg *c);

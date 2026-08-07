@@ -554,6 +554,22 @@ void k3_moe(float *out, const float *x, const K3MoeW *w, const K3Cfg *c,
         k3_router(idx, wt, xt, w->gate, w->bias, E, c->n_experts, c->topk,
                   c->moe_renorm, c->routed_scale);
 
+        int nk = c->topk;
+        /* Draft cache-only routing: keep only the top-k experts already resident, and
+         * renormalise their weights so the mixture still sums as intended. This makes a
+         * draft token read ZERO new expert bytes. It is an approximation, which is exactly
+         * what a draft is; the exact model verifies every proposed token. */
+        if (w->cache_only && w->src && w->src->resident) {
+            int m = 0; float wsum = 0.0f;
+            for (int j = 0; j < c->topk; j++) {
+                if (w->src->resident(w->src, w->layer, idx[j], NULL)) {
+                    idx[m] = idx[j]; wt[m] = wt[j]; wsum += wt[j]; m++;
+                }
+            }
+            nk = m;
+            if (wsum > 0.0f) for (int j = 0; j < nk; j++) wt[j] /= wsum;
+        }
+
         /* 2. down-project into the latent space */
         k3_mmw(z, xt, w->down, w->wdt, E, L);
 
@@ -564,20 +580,24 @@ void k3_moe(float *out, const float *x, const K3MoeW *w, const K3Cfg *c,
          * again: a queue depth of one against a drive that needs depth to reach its
          * rated bandwidth. getmany is optional and may be NULL, in which case nothing
          * changes and the loop reads them one at a time exactly as before. */
-        if (w->src && w->src->getmany) w->src->getmany(w->src, w->layer, idx, c->topk);
-        for (int j = 0; j < c->topk; j++) {
+        if (!w->cache_only && w->src && w->src->getmany)
+            w->src->getmany(w->src, w->layer, idx, nk);
+        for (int j = 0; j < nk; j++) {
             if (w->src) {
-                /* Streamed: the expert stays MXFP4 and the matmul reads nibbles. */
+                /* Streamed: the expert stays MXFP4 and the matmul reads nibbles. In
+                 * cache-only mode every idx[j] is known resident, so resident() serves it
+                 * with no disk read; otherwise get() may read it. */
                 K3ExpertQ q;
-                if (w->src->get(w->src, w->layer, idx[j], &q) != 0) {
-                    /* Never drop an expert silently. A bare `continue` here is
-                     * invisible from the outside: one transient short read or EIO
-                     * leaves this token's routed output missing 1/16 of its weighted
-                     * sum, the run completes, prints a plausible token, and reports
-                     * success. Wrong output that looks right is the worst failure this
-                     * engine can produce, so the drop is counted in the global
-                     * k3_expert_drops and every caller MUST fail the run on a non-zero
-                     * count (src/cli/k3_run.c does; see docs/API.md). */
+                int miss = w->cache_only
+                    ? !w->src->resident(w->src, w->layer, idx[j], &q)
+                    : (w->src->get(w->src, w->layer, idx[j], &q) != 0);
+                if (miss) {
+                    /* A cache-only draft filtered to resident experts already, so a miss
+                     * here is a benign race at worst; skip it, since the draft is
+                     * approximate by construction and the exact model verifies. On the
+                     * exact path a miss is the unacceptable silent-corruption case: count
+                     * it in k3_expert_drops so the caller fails the run (see docs/API.md). */
+                    if (w->cache_only) continue;
                     k3_expert_drops++;
                     fprintf(stderr, "EXPERT DROP: layer %d expert %d failed to load; "
                                     "this token is CORRUPT\n", w->layer, idx[j]);
@@ -651,7 +671,10 @@ void k3_moe_prefill(float *out, const float *x, const K3MoeW *w, const K3Cfg *c,
      * batched and the reference token streams for a bit-identity A/B. */
     static int no_batch = -1;
     if (no_batch < 0) no_batch = getenv("K3_NO_BATCH_PREFILL") ? 1 : 0;
-    if (!w->src || T <= 1 || no_batch) { /* nothing to batch; defer to the per-token path */
+    /* cache_only renormalises per token over the resident subset, which the per-token
+     * path already does; the draft's prompt prefill is one-time, so defer rather than
+     * duplicate the renorm in the batch. */
+    if (!w->src || T <= 1 || no_batch || w->cache_only) {
         k3_moe(out, x, w, c, T, idx, wt, scratch);
         return;
     }

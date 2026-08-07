@@ -212,6 +212,21 @@ static int cache_getmany(K3ExpertSrc *self, int layer, const int *ids, int n)
     return ok;
 }
 
+/* Is this expert already resident, i.e. would get() serve it with no disk read? Used by
+ * the draft model's cache-only routing to propose tokens without any expert I/O; if it
+ * is resident, fill_q hands back the same bytes get() would. */
+static int cache_resident(K3ExpertSrc *self, int layer, int expert, K3ExpertQ *out)
+{
+    K3Cache *c = (K3Cache *)self;
+    if (layer < 0 || layer >= c->n_layers || expert < 0 || expert >= c->n_experts)
+        return 0;
+    const int32_t key = layer * c->n_experts + expert;
+    const int slot = c->slot_of[key];
+    if (slot < 0) return 0;
+    if (out) fill_q(c, slot, out);
+    return 1;
+}
+
 static int cache_get(K3ExpertSrc *self, int layer, int expert, K3ExpertQ *out)
 {
     K3Cache *c = (K3Cache *)self;          /* src is the first member, by contract */
@@ -244,6 +259,7 @@ int k3_cache_init(K3Cache *c, const K3St *st, const K3Cfg *cfg, int64_t budget_b
 {
     memset(c, 0, sizeof *c);
     c->src.get = cache_get;
+    c->src.resident = cache_resident;
     /* K3_NOPREFETCH=1 disables the batch path at runtime. An A/B between two BUILDS
      * compares two binaries; an A/B on one binary compares one decision, which is the
      * only way to attribute a timing difference to the prefetch rather than to the
