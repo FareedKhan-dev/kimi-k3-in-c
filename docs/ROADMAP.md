@@ -31,27 +31,23 @@ The bf16 trunk matmul and the MXFP4 expert matmul already have hand-written AVX2
 KDA recurrence does not: it is still plain scalar C, and it is the largest remaining
 un-vectorised kernel on the non-I/O path.
 
-## 5. Sampling
+## 5. Chat retained-state equivalence
 
-Greedy only today. Adding temperature and top-p is small, but note the trade-off: greedy
-decoding is what makes output identical across memory budgets, which is a property the
-test-suite depends on. Sampling must be opt-in and off by default.
+Text chat now implements K3's official XTML formatting, JSONL restart, and safe complete
+history re-prefill. The next optimization is retaining in-process KDA/MLA state across
+REPL turns only after an equivalence gate proves that its token stream matches a full
+re-prefill of the same transcript.
 
-## 6. Chat template
-
-K3 ships an XTML chat format. Without it the engine produces base-model continuations,
-which is why asking a question gets the question completed rather than answered.
-
-## 7. Vision
+## 6. Vision
 
 K3 is natively multimodal. The vision tower is 27 layers and ~0.4B parameters, small,
 and its weights are ~0.9 GB, a fraction of a percent of the checkpoint. Self-contained
 enough to be tractable.
 
-## 8. Serving
+## 7. Tools and serving
 
-No HTTP API. Deliberately last: it is product surface, and everything above changes what
-would be served.
+The message model leaves room for tool calls, but there is no tool execution or HTTP API.
+Both remain deliberately late product surface.
 
 ## Explicitly not planned
 
