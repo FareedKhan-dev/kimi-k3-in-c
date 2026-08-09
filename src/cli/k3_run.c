@@ -45,6 +45,8 @@
 #endif
 
 #include <math.h>
+#include <errno.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -62,6 +64,8 @@
 #include "k3_cache.h"
 #include "k3_trunk.h"
 #include "k3_tok.h"   /* text in/out; the --ids path never touches it */
+#include "k3_chat.h"
+#include "k3_sampler.h"
 #include "k3_cfg.h"   /* read the checkpoint's own config rather than assuming it */
 
 static double now_s(void)
@@ -377,6 +381,15 @@ static void usage(FILE *f)
 "                        streams, so repetitive text decodes up to several times faster\n"
 "  --tok DIR             directory with tiktoken.model and tokenizer_config.json\n"
 "\n"
+"chat (text-only Kimi K3 XTML):\n"
+"  --chat                terminal REPL; uses the official XTML template\n"
+"  --system TEXT         initial system message (stored in --history)\n"
+"  --history PATH        portable JSONL transcript; rebuilt on restart\n"
+"  --temperature X       chat sampling temperature (default 1.0)\n"
+"  --top-p P             chat nucleus probability (default 0.95)\n"
+"  --seed N              deterministic chat sampling seed\n"
+"  --greedy              use argmax instead of chat sampling\n"
+"\n"
 "diagnostics:\n"
 "  --config PATH         model config; defaults to <model_dir>/config.json\n"
 "  --layers N            bind only the first N layers (partial shard sets)\n"
@@ -648,6 +661,178 @@ static int forward(Weights *w, const K3Cfg *c, K3Cache *cache, const int *ids, i
     return 0;
 }
 
+/* ----------------------------------------------------------------------- chat ----
+ * Chat deliberately owns only transcript and decode policy.  It calls the exact same
+ * forward() and streamed K3Cache as batch mode, so --preset/--trunk-gb/--cache-gb keep
+ * their meanings.  The first version re-prefills the full transcript for every REPL
+ * turn; retaining a live suffix is enabled only after its equivalence gate exists. */
+static int chat_read_line(char **out)
+{
+    char *line = NULL; size_t cap = 0;
+    printf("user> "); fflush(stdout);
+    if (getline(&line, &cap, stdin) < 0) { free(line); return 0; }
+    size_t n = strlen(line);
+    while (n && (line[n - 1] == '\n' || line[n - 1] == '\r')) line[--n] = 0;
+    *out = line; return 1;
+}
+
+static int chat_render_ids(Tok *tok, const K3ChatHistory *history,
+                           int **ids_out, int *n_out, char *err, size_t err_n)
+{
+    K3ChatSegments segs;
+    if (k3_chat_render(history, 1, &segs, err, err_n) != 0) return -1;
+    /* One sentinel slot distinguishes a prompt exactly at the engine limit from one
+     * that the tokenizer would otherwise silently truncate. */
+    int *ids = (int *)malloc((size_t)(K3_MAX_PROMPT + 1) * sizeof(*ids));
+    if (!ids) { k3_chat_segments_free(&segs); snprintf(err, err_n, "OOM allocating chat prompt"); return -1; }
+    int n = k3_chat_encode(tok, &segs, ids, K3_MAX_PROMPT + 1, err, err_n);
+    k3_chat_segments_free(&segs);
+    if (n <= 0 || n > K3_MAX_PROMPT) {
+        free(ids);
+        if (n == 0) snprintf(err, err_n, "rendered chat prompt has no tokens");
+        else if (n > K3_MAX_PROMPT) snprintf(err, err_n, "rendered chat prompt exceeds the %d-token engine context limit", K3_MAX_PROMPT);
+        return -1;
+    }
+    *ids_out = ids; *n_out = n; return 0;
+}
+
+static int chat_resize(int want, int *tmax, int nl, int maxb, size_t kper,
+                       Weights *w, const K3Cfg *c,
+                       float **h, float **br, float **sc, int **seq)
+{
+    if (want <= *tmax) return 0;
+    const int E = c->hidden;
+    size_t sc_need = k3_layer_scratch(c, want);
+    size_t inc_need = k3_mla_scratch_cached(c, want, want, 1);
+    if (inc_need > sc_need) sc_need = inc_need;
+    float *nh = (float *)malloc((size_t)want * E * sizeof(*nh));
+    float *nb = (float *)malloc((size_t)want * maxb * E * sizeof(*nb));
+    float *ns = (float *)malloc(sc_need * sizeof(*ns));
+    int *nq = (int *)malloc((size_t)(want + 8) * sizeof(*nq));
+    float *nk = NULL, *nr = NULL;
+    if (w->kvc) {
+        const size_t kvper = (size_t)want * c->n_heads * (c->qk_nope + c->v_head);
+        const size_t rpper = (size_t)want * c->qk_rope;
+        nk = (float *)calloc(kvper * (size_t)w->n_mla, sizeof(*nk));
+        nr = (float *)calloc(rpper * (size_t)w->n_mla, sizeof(*nr));
+    }
+    if (!nh || !nb || !ns || !nq || (w->kvc && (!nk || !nr))) {
+        free(nh); free(nb); free(ns); free(nq); free(nk); free(nr);
+        fprintf(stderr, "chat: buffer allocation failed for %d positions\n", want); return -1;
+    }
+    free(*h); free(*br); free(*sc); free(*seq);
+    *h = nh; *br = nb; *sc = ns; *seq = nq;
+    if (w->kvc) { free(w->kvc); free(w->ropec); w->kvc = nk; w->ropec = nr; w->kv_cap = want; }
+    *tmax = want;
+    (void)nl; (void)kper;
+    return 0;
+}
+
+static int chat_run(Tok *tok, const K3ChatTemplate *tmpl, K3ChatHistory *history,
+                    const char *history_path, int **prompt_ref, int np, int gen,
+                    int incremental, int greedy, double temperature, double top_p,
+                    uint64_t seed, Weights *w, const K3Cfg *c, K3Cache *cache,
+                    int nl, int *tmax, float **h, float **br, float *ks,
+                    float **sc, float *lg, int **seq, int *outtok, int maxb, size_t kper)
+{
+    char err[512]; int turn = 0;
+    int *prompt = *prompt_ref;
+    for (int i = 0; i < history->n; i++) if (history->v[i].role == K3_CHAT_ASSISTANT) turn++;
+    for (;;) {
+        const int need = np + gen + 1;
+        if (np > K3_MAX_PROMPT || need > K3_MAX_PROMPT + K3_MAX_GEN) {
+            fprintf(stderr, "chat: rendered transcript is %d tokens; current engine limit is %d prompt + %d generation tokens\n", np, K3_MAX_PROMPT, K3_MAX_GEN);
+            return 1;
+        }
+        if (incremental) {
+            const double kv_need = (double)need * K3_KV_BYTES_PER_POS;
+            const double avail = mem_available_bytes();
+            if (avail > 0.0 && kv_need > avail * 0.9) {
+                char kb[32], ab[32];
+                human(kv_need, kb, sizeof kb); human(avail, ab, sizeof ab);
+                fprintf(stderr, "chat: KV cache for %d positions needs %s, but only %s is available; history was preserved\n", need, kb, ab);
+                return 1;
+            }
+        }
+        if (chat_resize(need, tmax, nl, maxb, kper, w, c, h, br, sc, seq) != 0) return 1;
+        memcpy(*seq, prompt, (size_t)np * sizeof(**seq));
+        memset(ks, 0, kper * (size_t)nl * sizeof(*ks));
+        if (incremental) {
+            const size_t kvper = (size_t)w->kv_cap * c->n_heads * (c->qk_nope + c->v_head);
+            const size_t rpper = (size_t)w->kv_cap * c->qk_rope;
+            memset(w->kvc, 0, kvper * (size_t)w->n_mla * sizeof(*w->kvc));
+            memset(w->ropec, 0, rpper * (size_t)w->n_mla * sizeof(*w->ropec));
+        }
+        w->cached = 0;
+        int T = np, nraw = 0, frc = 0;
+        K3Sampler sampler; k3_sampler_init(&sampler, temperature, top_p, seed, (uint64_t)(turn + 1));
+        while (nraw < gen) {
+            if (incremental) {
+                if (!nraw) {
+                    frc = forward(w, c, cache, *seq, T, lg, *sc, *h, *br, ks, NULL);
+                    if (!frc) w->cached = T;
+                } else {
+                    frc = forward(w, c, cache, *seq + T - 1, 1, lg, *sc, *h, *br, ks, NULL);
+                    if (!frc) w->cached++;
+                }
+            } else {
+                frc = forward(w, c, cache, *seq, T, lg, *sc, *h, *br, ks, NULL);
+            }
+            if (frc) break;
+            int next = 0;
+            if (k3_sampler_next(&sampler, lg, c->vocab, greedy, &next) != 0) {
+                fprintf(stderr, "chat: sampler failed\n"); frc = -1; break;
+            }
+            (*seq)[T++] = next; outtok[nraw++] = next;
+            if (next == tmpl->eom_id) break;
+        }
+        k3_sampler_free(&sampler);
+        if (frc || (nraw == gen && outtok[nraw - 1] != tmpl->eom_id)) {
+            fprintf(stderr, "chat: assistant did not complete an official turn within --gen %d; transcript is preserved\n", gen);
+            return 1;
+        }
+        K3ChatMessage assistant;
+        if (k3_chat_parse_assistant(tok, tmpl, outtok, nraw, &assistant, err, sizeof err) != 0) {
+            fprintf(stderr, "chat: malformed assistant turn: %s\n", err); return 1;
+        }
+        printf("<think>%s</think>\n<response>%s</response>\n", assistant.reasoning_content, assistant.content);
+        if (k3_chat_history_add(history, K3_CHAT_ASSISTANT, assistant.content,
+                                assistant.reasoning_content, err, sizeof err) != 0) {
+            fprintf(stderr, "chat: %s\n", err); k3_chat_message_free(&assistant); return 1;
+        }
+        k3_chat_message_free(&assistant); turn++;
+        if (history_path && k3_chat_history_save(history, history_path, err, sizeof err) != 0) {
+            fprintf(stderr, "chat: %s\n", err); return 1;
+        }
+
+        for (;;) {
+            char *line = NULL;
+            if (!chat_read_line(&line)) return 0;
+            if (!strcmp(line, "/exit")) { free(line); return 0; }
+            if (!strcmp(line, "/help")) { printf("/help  show commands\n/reset clear this conversation\n/exit  leave chat\n"); free(line); continue; }
+            if (!strcmp(line, "/reset")) {
+                if (k3_chat_history_reset(history, err, sizeof err) != 0) {
+                    fprintf(stderr, "chat: %s\n", err); free(line); return 1;
+                }
+                if (history_path && k3_chat_history_save(history, history_path, err, sizeof err)) { fprintf(stderr, "chat: %s\n", err); return 1; }
+                printf("chat reset\n"); free(line); continue;
+            }
+            if (!*line) { free(line); continue; }
+            if (k3_chat_history_add(history, K3_CHAT_USER, line, NULL, err, sizeof err)) { fprintf(stderr, "chat: %s\n", err); free(line); return 1; }
+            free(line);
+            int *new_prompt = NULL, new_np = 0;
+            if (chat_render_ids(tok, history, &new_prompt, &new_np, err, sizeof err) != 0 || new_np > K3_MAX_PROMPT) {
+                if (new_prompt) free(new_prompt);
+                k3_chat_message_free(&history->v[--history->n]);
+                fprintf(stderr, "chat: %s\n", new_np > K3_MAX_PROMPT ? "context limit reached; history was not changed" : err);
+                continue;
+            }
+            if (history_path && k3_chat_history_save(history, history_path, err, sizeof err)) { free(new_prompt); fprintf(stderr, "chat: %s\n", err); return 1; }
+            free(prompt); prompt = new_prompt; *prompt_ref = prompt; np = new_np; break;
+        }
+    }
+}
+
 int main(int argc, char **argv)
 {
     /* Informational flags are answered before anything else, because they must work
@@ -673,8 +858,9 @@ int main(int argc, char **argv)
     const char *trace_dir = NULL;
     const char *logits_path = NULL;
     const char *prompt_text = NULL, *prompt_file = NULL, *tok_dir = NULL;
+    const char *system_text = NULL, *history_path = NULL;
     const char *cfg_path = NULL;
-    int gen = 8, want_layers = -1;
+    int gen = 8, want_layers = -1, gen_set = 0;
     double cache_gb = 64.0, trunk_gb = 16.0;
     int budget_auto = 0;
     int spec_n = 0;
@@ -683,17 +869,20 @@ int main(int argc, char **argv)
     double draft_gb = 6.0;
     const char *load_state = NULL, *save_state = NULL;
     const char *preset_name = NULL;
-    int incremental = 0, ultra = 0;
+    int incremental = 0, ultra = 0, chat = 0, greedy = 0;
+    int temperature_set = 0, top_p_set = 0, seed_set = 0, out_set = 0;
+    double temperature = 1.0, top_p = 0.95;
+    uint64_t seed = 0;
     for (int i = 2; i < argc; i++) {
         if (!strcmp(argv[i], "--ids") && i + 1 < argc) ids_s = argv[++i];
         else if (!strcmp(argv[i], "--prompt") && i + 1 < argc) prompt_text = argv[++i];
         else if (!strcmp(argv[i], "--prompt-file") && i + 1 < argc) prompt_file = argv[++i];
         else if (!strcmp(argv[i], "--tok") && i + 1 < argc) tok_dir = argv[++i];
         else if (!strcmp(argv[i], "--config") && i + 1 < argc) cfg_path = argv[++i];
-        else if (!strcmp(argv[i], "--gen") && i + 1 < argc) gen = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--gen") && i + 1 < argc) { gen = atoi(argv[++i]); gen_set = 1; }
         else if (!strcmp(argv[i], "--cache-gb") && i + 1 < argc) cache_gb = atof(argv[++i]);
         else if (!strcmp(argv[i], "--layers") && i + 1 < argc) want_layers = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--out") && i + 1 < argc) outp = argv[++i];
+        else if (!strcmp(argv[i], "--out") && i + 1 < argc) { outp = argv[++i]; out_set = 1; }
         else if (!strcmp(argv[i], "--trunk") && i + 1 < argc) trunk_dir = argv[++i];
         else if (!strcmp(argv[i], "--spec") && i + 1 < argc) spec_n = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--tf-check")) tf_check = 1;
@@ -708,6 +897,19 @@ int main(int argc, char **argv)
         }
         else if (!strcmp(argv[i], "--incremental")) incremental = 1;
         else if (!strcmp(argv[i], "--ultra-low-memory")) ultra = 1;
+        else if (!strcmp(argv[i], "--chat")) chat = 1;
+        else if (!strcmp(argv[i], "--system") && i + 1 < argc) system_text = argv[++i];
+        else if (!strcmp(argv[i], "--history") && i + 1 < argc) history_path = argv[++i];
+        else if (!strcmp(argv[i], "--temperature") && i + 1 < argc) { temperature = atof(argv[++i]); temperature_set = 1; }
+        else if (!strcmp(argv[i], "--top-p") && i + 1 < argc) { top_p = atof(argv[++i]); top_p_set = 1; }
+        else if (!strcmp(argv[i], "--seed") && i + 1 < argc) {
+            const char *value = argv[++i];
+            char *end = NULL;
+            errno = 0; seed = strtoull(value, &end, 10);
+            if (value[0] == '-' || errno || !end || *end) { fprintf(stderr, "--seed needs an unsigned integer\n"); return 2; }
+            seed_set = 1;
+        }
+        else if (!strcmp(argv[i], "--greedy")) greedy = 1;
         else if (!strcmp(argv[i], "--dump-logits") && i + 1 < argc) logits_path = argv[++i];
         else if (!strcmp(argv[i], "--dump-cache-trace") && i + 1 < argc) trace_dir = argv[++i];
         else if (!strcmp(argv[i], "--preset") && i + 1 < argc && !strcmp(argv[i + 1], "auto")) {
@@ -757,9 +959,14 @@ int main(int argc, char **argv)
                 "use deterministic serial decode\n");
         return 2;
     }
+    if (chat && !gen_set) gen = K3_MAX_GEN;
     {
         int nsrc = (ids_s != NULL) + (prompt_text != NULL) + (prompt_file != NULL);
-        if (nsrc == 0) {
+        if (chat && nsrc) {
+            fprintf(stderr, "--chat supplies its prompt through the REPL/history; do not also pass --ids, --prompt, or --prompt-file\n");
+            return 2;
+        }
+        if (!chat && nsrc == 0) {
             fprintf(stderr, "one of --ids, --prompt or --prompt-file is required\n");
             return 2;
         }
@@ -769,6 +976,32 @@ int main(int argc, char **argv)
             fprintf(stderr, "--ids, --prompt and --prompt-file are mutually exclusive\n");
             return 2;
         }
+    }
+    if (chat) {
+        if (!tok_dir) {
+            fprintf(stderr, "--chat needs --tok DIR with the official Kimi K3 tokenizer files\n");
+            return 2;
+        }
+        if (load_state || save_state || draft_dir || spec_n || tf_check || logits_path || trace_dir || out_set) {
+            fprintf(stderr, "--chat cannot be combined with state files, speculative/draft modes, diagnostics, or --out\n");
+            return 2;
+        }
+        if (!(temperature > 0.0) || !isfinite(temperature) || !(top_p > 0.0) || top_p > 1.0 || !isfinite(top_p)) {
+            fprintf(stderr, "--temperature must be finite and > 0; --top-p must be in (0, 1]\n");
+            return 2;
+        }
+        if (gen <= 0) {
+            fprintf(stderr, "--chat needs --gen greater than zero to complete an assistant turn\n");
+            return 2;
+        }
+    } else if (system_text || history_path || temperature_set || top_p_set || seed_set || greedy) {
+        fprintf(stderr, "--system, --history, --temperature, --top-p, --seed, and --greedy require --chat\n");
+        return 2;
+    }
+    if (chat && !seed_set) {
+        /* A supplied seed is reproducible across restarts.  Without one, start a fresh
+         * stochastic session; the generated value is printed in the banner. */
+        seed = (uint64_t)time(NULL) ^ ((uint64_t)(uintptr_t)&seed << 16);
     }
 
     /* ---- auto budget ----
@@ -855,44 +1088,111 @@ int main(int argc, char **argv)
     }
 
     /* ---- prompt ----
-     * Three entry points, one representation. --ids is the reproducible channel every
-     * fixture and the oracle use, and stays the default for validation work. --prompt /
-     * --prompt-file tokenize here in C, which is what makes the engine text-in/text-out
-     * without a Python step. The tokenizer is loaded ONLY when actually needed, so the
-     * id path keeps working on a box that has no tokenizer files at all. */
-    /* Heap, not stack. This was `int prompt[4096]` and it was the reason the engine
-     * refused prompts longer than 4096 ids -- a stack-array size, not a model or memory
-     * limit. */
-    int *prompt = (int *)malloc((size_t)K3_MAX_PROMPT * sizeof(int));
-    if (!prompt) { fprintf(stderr, "OOM allocating prompt buffer\n"); return 2; }
+     * Batch keeps its historical three input channels.  Chat has one more explicit
+     * representation: transcript records are rendered with the official XTML segment
+     * encoder, never by treating a generic template string as a prompt. */
+    int *prompt = NULL;
     int np = 0;
     Tok tok; int have_tok = 0;
+    K3ChatHistory chat_history;
+    K3ChatTemplate chat_template;
+    k3_chat_history_init(&chat_history);
 
-    if (prompt_text || prompt_file) {
-        if (!tok_dir) {
-            fprintf(stderr, "--prompt/--prompt-file need --tok DIR (the directory with "
-                            "tiktoken.model and tokenizer_config.json)\n");
-            return 2;
-        }
+    if (chat) {
+        char err[512];
         k3_tok_load(&tok, tok_dir);
         have_tok = 1;
-
-        char *ptext = NULL; long plen = 0;
-        if (prompt_file) {
-            ptext = tk_read_file(prompt_file, &plen);   /* exits if unreadable */
-        } else {
-            plen  = (long)strlen(prompt_text);
-            ptext = (char *)malloc((size_t)plen + 1);
-            if (!ptext) { fprintf(stderr, "OOM on prompt\n"); return 2; }
-            memcpy(ptext, prompt_text, (size_t)plen + 1);
+        if (k3_chat_template_init(&tok, &chat_template, err, sizeof err) != 0) {
+            fprintf(stderr, "chat: %s\n", err); return 2;
         }
-        np = tok_encode(&tok, ptext, (int)plen, prompt, K3_MAX_PROMPT);
-        free(ptext);
-        printf("  tokenized: %ld bytes -> %d ids\n", plen, np);
+        if (history_path && k3_chat_history_load(&chat_history, history_path, err, sizeof err) != 0) {
+            fprintf(stderr, "chat: %s\n", err); return 2;
+        }
+        if (system_text) {
+            if (chat_history.n) {
+                if (chat_history.v[0].role != K3_CHAT_SYSTEM || strcmp(chat_history.v[0].content, system_text)) {
+                    fprintf(stderr, "chat: --system does not match the initial system record in %s\n", history_path ? history_path : "history");
+                    return 2;
+                }
+            } else if (k3_chat_history_add(&chat_history, K3_CHAT_SYSTEM, system_text, NULL, err, sizeof err) != 0) {
+                fprintf(stderr, "chat: %s\n", err); return 2;
+            }
+        }
+        /* Persist a supplied system record immediately. It is part of the portable
+         * conversation contract even if the user exits before asking a first question. */
+        if (history_path && k3_chat_history_save(&chat_history, history_path, err, sizeof err) != 0) {
+            fprintf(stderr, "chat: %s\n", err); return 2;
+        }
+
+        /* A transcript ending in a user turn can be resumed after an interrupted run.
+         * Otherwise read exactly one fresh user turn before the expensive model setup,
+         * so the buffers and KV plan are sized from the real rendered prompt. */
+        while (!chat_history.n || chat_history.v[chat_history.n - 1].role != K3_CHAT_USER) {
+            char *line = NULL;
+            if (!chat_read_line(&line)) { k3_chat_history_free(&chat_history); return 0; }
+            if (!strcmp(line, "/exit")) { free(line); k3_chat_history_free(&chat_history); return 0; }
+            if (!strcmp(line, "/help")) {
+                printf("/help  show commands\n/reset clear this conversation\n/exit  leave chat\n");
+                free(line); continue;
+            }
+            if (!strcmp(line, "/reset")) {
+                if (k3_chat_history_reset(&chat_history, err, sizeof err) != 0) {
+                    fprintf(stderr, "chat: %s\n", err); free(line); return 2;
+                }
+                if (history_path && k3_chat_history_save(&chat_history, history_path, err, sizeof err) != 0) {
+                    fprintf(stderr, "chat: %s\n", err); return 2;
+                }
+                printf("chat reset\n"); free(line); continue;
+            }
+            if (!*line) { free(line); continue; }
+            if (k3_chat_history_add(&chat_history, K3_CHAT_USER, line, NULL, err, sizeof err) != 0) {
+                fprintf(stderr, "chat: %s\n", err); free(line); return 2;
+            }
+            free(line);
+            break;
+        }
+        if (chat_render_ids(&tok, &chat_history, &prompt, &np, err, sizeof err) != 0) {
+            fprintf(stderr, "chat: %s\n", err); return 2;
+        }
+        if (history_path && k3_chat_history_save(&chat_history, history_path, err, sizeof err) != 0) {
+            fprintf(stderr, "chat: %s\n", err); return 2;
+        }
+        printf("  XTML prompt: %d ids, generation limit %d, %s\n", np, gen,
+               greedy ? "greedy" : "temperature/top-p sampling");
+        if (!greedy) printf("  sampler  : PCG32 seed %llu, temperature %.3f, top-p %.3f\n",
+                            (unsigned long long)seed, temperature, top_p);
     } else {
-        for (const char *p = ids_s; *p && np < K3_MAX_PROMPT; ) {
-            prompt[np++] = (int)strtol(p, (char **)&p, 10);
-            while (*p == ',' || *p == ' ') p++;
+        /* Heap, not stack. This was `int prompt[4096]` and it was the reason the engine
+         * refused prompts longer than 4096 ids -- a stack-array size, not a model or
+         * memory limit. */
+        prompt = (int *)malloc((size_t)K3_MAX_PROMPT * sizeof(int));
+        if (!prompt) { fprintf(stderr, "OOM allocating prompt buffer\n"); return 2; }
+        if (prompt_text || prompt_file) {
+            if (!tok_dir) {
+                fprintf(stderr, "--prompt/--prompt-file need --tok DIR (the directory with "
+                                "tiktoken.model and tokenizer_config.json)\n");
+                return 2;
+            }
+            k3_tok_load(&tok, tok_dir);
+            have_tok = 1;
+
+            char *ptext = NULL; long plen = 0;
+            if (prompt_file) {
+                ptext = tk_read_file(prompt_file, &plen);   /* exits if unreadable */
+            } else {
+                plen  = (long)strlen(prompt_text);
+                ptext = (char *)malloc((size_t)plen + 1);
+                if (!ptext) { fprintf(stderr, "OOM on prompt\n"); return 2; }
+                memcpy(ptext, prompt_text, (size_t)plen + 1);
+            }
+            np = tok_encode(&tok, ptext, (int)plen, prompt, K3_MAX_PROMPT);
+            free(ptext);
+            printf("  tokenized: %ld bytes -> %d ids\n", plen, np);
+        } else {
+            for (const char *p = ids_s; *p && np < K3_MAX_PROMPT; ) {
+                prompt[np++] = (int)strtol(p, (char **)&p, 10);
+                while (*p == ',' || *p == ' ') p++;
+            }
         }
     }
     if (np == 0) { fprintf(stderr, "no prompt ids parsed\n"); return 2; }
@@ -1124,7 +1424,7 @@ int main(int argc, char **argv)
         prior = shd.nseq;
         printf("resuming from %s: %d prior positions, %d new\n\n", load_state, prior, np);
     }
-    const int Tmax = prior + np + gen + 1;
+    int Tmax = prior + np + gen + 1;
     const int E = c.hidden;
     const int maxb = c.n_layers / c.attn_res_block + 2;
     const int P = c.kda_heads * c.kda_head_dim;
@@ -1212,6 +1512,25 @@ int main(int argc, char **argv)
             printf("restored %d positions in %.2f s: decode continues without "
                    "re-reading the prior context\n\n", w.cached, now_s() - tl);
         }
+    }
+
+    if (chat) {
+        const int rc = chat_run(&tok, &chat_template, &chat_history, history_path,
+                                &prompt, np, gen, incremental, greedy, temperature,
+                                top_p, seed, &w, &c, &cache, NL, &Tmax, &h, &br, ks,
+                                &sc, lg, &seq, outtok, maxb, kper);
+        free(w.kvc); free(w.ropec); free(w.mla_slot);
+        if (w.trunk) k3_trunk_close(w.trunk);
+        k3_cache_free(&cache);
+        for (int L = 0; L < w.n_bound; L++) k3_bind_free(&w.lay[L]);
+        free(w.lay); k3_bind_model_free(&w.mb); k3_st_close(&st);
+        free(h); free(br); free(ks); free(sc); free(lg); free(seq); free(outtok);
+        free(prompt); k3_chat_history_free(&chat_history);
+        if (k3_expert_drops) {
+            fprintf(stderr, "chat invalid: %ld routed expert load(s) failed; the transcript was preserved\n", k3_expert_drops);
+            return 4;
+        }
+        return rc;
     }
 
     /* --spec needs a snapshot of the carried KDA/ShortConv state to roll back a
