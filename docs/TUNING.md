@@ -65,6 +65,7 @@ $ ./bin/k3 --list-presets
 
 | preset | trunk | cache | total | expect |
 |---|---:|---:|---:|---|
+| `ultra` | 2.5 | 0.31 | ~3 GB | proof-of-life only; streams embed/lm_head and reuses one state slot |
 | `laptop` | 3 | 1 | ~10 GB | ~32 s/token |
 | `desktop` | 16 | 10 | ~32 GB | ~31 s/token |
 | `workstation` | 60 | 30 | ~96 GB | ~24 s/token |
@@ -76,6 +77,12 @@ that is spent on a cache that contributes little. Note `max` is not faster than 
 in these measurements, the extra 96 GB buys nothing outside the noise floor.
 
 Flags after `--preset` override it, so `--preset server --cache-gb 40` works.
+
+`ultra` is deliberately a separate execution path, not a smaller ordinary preset. It
+requires a packed trunk, streams exact BF16 embedding/lm_head bytes, and with full
+recompute clears and reuses one layer-state slot. It trades I/O for RAM and is intended
+for short, deterministic proof runs; speculative/draft decoding is rejected in this
+mode. The arithmetic, Top-K routing and weight precision are unchanged.
 
 ## Other options
 

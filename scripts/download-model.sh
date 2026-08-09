@@ -163,6 +163,13 @@ else
     hf cache verify "$REPO" --revision "$REVISION" --local-dir "$DEST" \
         --fail-on-missing-files
     echo "  RESULT : checksum-verified snapshot at $REVISION"
+    # The proof runner must be able to prove which immutable Hub snapshot these bytes
+    # came from without re-hashing 1.56 TB immediately before every experiment. Write a
+    # marker only after the Hub checksum verification succeeds; size-only or explicitly
+    # skipped verification never creates it.
+    printf 'repo=%s\nrevision=%s\nverified_at=%s\n' \
+        "$REPO" "$REVISION" "$(date --iso-8601=seconds)" \
+        >"$DEST/.k3_hf_verified"
 fi
 echo
 echo "next: scripts/pack-trunk.sh $DEST <trunk_dir>"

@@ -81,7 +81,40 @@ typedef struct {
 } K3ModelBind;
 
 int  k3_bind_model(const K3St *s, const K3Cfg *c, int want_lm_head, K3ModelBind *m);
+/* Selective form used by the ultra-low-memory path. The ordinary entry point above
+ * remains the compatibility wrapper that always binds the embedding table. */
+int  k3_bind_model_parts(const K3St *s, const K3Cfg *c,
+                         int want_embed, int want_lm_head, K3ModelBind *m);
 void k3_bind_model_free(K3ModelBind *m);
+
+/* ---- streamed model-level matrices ------------------------------------------------
+ *
+ * embed_tokens and lm_head are 2.35 GB each in the released BF16 checkpoint. A short
+ * prompt needs only a few embedding rows, and greedy projection can walk lm_head in
+ * bounded row chunks. Each chunk still goes through k3_mmw, so the per-row arithmetic
+ * and reduction tree are identical to the resident path; only ownership and I/O
+ * lifetime change.
+ *
+ * One page-aligned buffer is shared by both operations. Returned values never point
+ * into it: embedding rows are widened into caller memory, and logits are completed
+ * before the next chunk overwrites the buffer. */
+typedef struct {
+    const K3St     *st;
+    const K3Tensor *embed, *lm_head;
+    unsigned char  *buf;
+    size_t          bufcap;
+    int             hidden, vocab;
+    int             embed_wdt, lm_head_wdt;
+    uint64_t        embed_bytes_read, lm_head_bytes_read;
+    double          read_seconds;
+} K3ModelStream;
+
+#define K3_MODEL_STREAM_CHUNK (4u << 20)
+
+int  k3_model_stream_init(K3ModelStream *m, const K3St *s, const K3Cfg *c);
+void k3_model_stream_free(K3ModelStream *m);
+int  k3_model_stream_embed_row(K3ModelStream *m, float *dst, int64_t row);
+int  k3_model_stream_project(K3ModelStream *m, float *logits, const float *x);
 
 /* BYTES one layer needs, without loading it. For sizing and for reporting. */
 int64_t k3_bind_layer_bytes(const K3St *s, const K3Cfg *c, int layer);
