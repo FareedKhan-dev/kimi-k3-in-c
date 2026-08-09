@@ -27,8 +27,29 @@ endif()
 option(K3_NATIVE_ARCH "Optimise for the building CPU (-march=native)" OFF)
 option(K3_SANITIZE    "Build with ASan + UBSan"                        OFF)
 
-find_package(OpenMP)
 find_package(Threads REQUIRED)
+
+# Apple Clang does not search Homebrew's OpenMP runtime by itself. Mirror the Makefile:
+# discover an installed libomp explicitly, rather than treating a missing OpenMP package
+# as a reason to silently build a different execution configuration.
+if(APPLE)
+  set(K3_OMP_PREFIX "" CACHE PATH "Prefix containing libomp include/ and lib/")
+  if(NOT K3_OMP_PREFIX)
+    execute_process(COMMAND brew --prefix libomp
+                    OUTPUT_VARIABLE K3_OMP_PREFIX
+                    OUTPUT_STRIP_TRAILING_WHITESPACE
+                    ERROR_QUIET)
+  endif()
+  if(K3_OMP_PREFIX)
+    find_path(K3_OMP_INCLUDE_DIR NAMES omp.h HINTS ${K3_OMP_PREFIX}/include)
+    find_library(K3_OMP_LIBRARY NAMES omp HINTS ${K3_OMP_PREFIX}/lib)
+  endif()
+  if(NOT K3_OMP_INCLUDE_DIR OR NOT K3_OMP_LIBRARY)
+    message(WARNING "Homebrew libomp was not found; install it with `brew install libomp` or configure -DK3_OMP_PREFIX=/path/to/libomp.")
+  endif()
+else()
+  find_package(OpenMP)
+endif()
 
 add_library(k3_flags INTERFACE)
 target_compile_options(k3_flags INTERFACE
@@ -43,10 +64,26 @@ target_compile_options(k3_flags INTERFACE
   -ffp-contract=off)
 
 if(K3_NATIVE_ARCH)
-  target_compile_options(k3_flags INTERFACE -march=native)
+  if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$")
+    target_compile_options(k3_flags INTERFACE -mcpu=native)
+  else()
+    target_compile_options(k3_flags INTERFACE -march=native)
+  endif()
+elseif(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$")
+  # Apple Silicon cannot accept the x86 AVX2/FMA baseline below.  This matches the
+  # Makefile's architecture-neutral local tuning and leaves the scalar fallbacks active.
+  target_compile_options(k3_flags INTERFACE -mcpu=native)
 else()
   # Documented baseline. The engine assumes AVX2 + FMA are available.
   target_compile_options(k3_flags INTERFACE -mavx2 -mfma)
+endif()
+
+if(APPLE AND K3_OMP_INCLUDE_DIR AND K3_OMP_LIBRARY)
+  target_compile_options(k3_flags INTERFACE -Xpreprocessor -fopenmp)
+  target_include_directories(k3_flags INTERFACE ${K3_OMP_INCLUDE_DIR})
+  target_link_libraries(k3_flags INTERFACE ${K3_OMP_LIBRARY})
+elseif(OpenMP_C_FOUND)
+  target_link_libraries(k3_flags INTERFACE OpenMP::OpenMP_C)
 endif()
 
 if(K3_SANITIZE)
@@ -74,14 +111,20 @@ target_include_directories(k3 PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src/tokenizer)
 
 target_link_libraries(k3 PUBLIC k3_flags m Threads::Threads)
-if(OpenMP_C_FOUND)
-  target_link_libraries(k3 PUBLIC OpenMP::OpenMP_C)
-endif()
 
 # ------------------------------------------------------------------------------ cli --
 add_executable(k3_cli src/cli/k3_run.c)
 set_target_properties(k3_cli PROPERTIES OUTPUT_NAME k3)
-target_link_libraries(k3_cli PRIVATE k3)
+
+# Chat is deliberately separate from the inference library: it is CLI policy and
+# transcript handling, not a new framework or a second execution backend.
+add_library(k3_chat STATIC src/chat/k3_chat.c src/chat/k3_sampler.c)
+target_include_directories(k3_chat PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/chat
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/tokenizer
+  ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
+target_link_libraries(k3_chat PUBLIC k3_flags m)
+target_link_libraries(k3_cli PRIVATE k3 k3_chat)
 
 # ---------------------------------------------------------------------------- tests --
 # Every test below runs WITHOUT model weights. The checkpoint is 1.56 TB; if correctness
@@ -98,6 +141,8 @@ k3_add_test(test_cache  tests/unit/test_cache.c)
 k3_add_test(test_st     tests/unit/test_st.c)
 k3_add_test(test_cfg    tests/unit/test_cfg.c)
 k3_add_test(test_tok    tests/unit/test_tok.c)
+k3_add_test(test_chat   tests/unit/test_chat.c)
+target_link_libraries(test_chat PRIVATE k3_chat)
 k3_add_test(scale_test  tests/unit/scale_test.c)
 k3_add_test(k3_model    tests/unit/k3_model.c)
 
@@ -111,6 +156,7 @@ add_test(NAME cache      COMMAND test_cache ${FIX}/cache)
 add_test(NAME config     COMMAND test_cfg   fixture ${FIX}/ref_k3.json)
 add_test(NAME scale      COMMAND scale_test)
 add_test(NAME oracle     COMMAND k3_model   ${FIX})
+add_test(NAME chat_template COMMAND test_chat ${FIX}/chat/tokenizer)
 
 # The negative half of the config contract. Each fixture is the working flat config with
 # exactly one field mutated, so a rejection can only come from that field. Without these

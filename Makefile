@@ -64,12 +64,16 @@ ifeq ($(UNAME_S),Darwin)
     $(warning libomp not found at $(OMP_PREFIX). Install it with `brew install libomp`,)
     $(warning or point the build at another copy with `make OMP_PREFIX=/path/to/libomp`.)
   endif
+  # Apple Clang's ASan runtime rejects detect_leaks entirely; keep the sanitizer gate
+  # portable by requesting only the failure-on-first-error behavior there.
+  ASAN_RUN_OPTIONS ?= halt_on_error=1
 else
   # -march=native is a real win on the expert matmuls but produces a binary that will
   # not run on an older CPU. `make portable` drops it.
   ARCH ?= -march=native
   OMP_CFLAGS ?= -fopenmp
   OMP_LDFLAGS ?= -fopenmp
+  ASAN_RUN_OPTIONS ?= detect_leaks=1:halt_on_error=1
 endif
 
 # -Wpointer-arith is not cosmetic: weight pointers are `const void *`, and arithmetic on
@@ -89,7 +93,7 @@ LDFLAGS  ?= -lm $(OMP_LDFLAGS) -pthread
 # Flat include search across the module dirs: sources use "k3.h", "k3_cache.h" etc
 # rather than path-qualified includes, which keeps them relocatable.
 INCLUDES := -Iinclude -Iinclude/k3 -Ithird_party \
-            -Isrc/core -Isrc/io -Isrc/cache -Isrc/model -Isrc/tokenizer
+            -Isrc/core -Isrc/io -Isrc/cache -Isrc/model -Isrc/tokenizer -Isrc/chat
 
 # ----------------------------------------------------------------------------- files --
 ENGINE_SRC := src/core/k3_ops.c \
@@ -99,10 +103,11 @@ ENGINE_SRC := src/core/k3_ops.c \
 ENGINE_OBJ := $(patsubst %.c,$(BUILD)/%.o,$(ENGINE_SRC))
 
 CLI_SRC    := src/cli/k3_run.c
+CHAT_SRC   := src/chat/k3_chat.c src/chat/k3_sampler.c
 CLI_BIN    := $(BIN)/k3
 
 # Tests that need no checkpoint. These run in CI on every push.
-UNIT_TESTS := test_ops test_cache test_st test_cfg test_tok scale_test k3_model
+UNIT_TESTS := test_ops test_cache test_st test_cfg test_tok test_chat scale_test k3_model
 # Tests that need real shards. Built and run by `make test-all` with SHARD_DIR set;
 # see the weights-test target below.
 WEIGHT_TESTS := test_expert test_real_layer
@@ -126,8 +131,8 @@ $(BUILD)/%.o: %.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
-$(CLI_BIN): $(CLI_SRC) $(ENGINE_OBJ) | $(BIN)
-	$(CC) $(CFLAGS) $(INCLUDES) $(CLI_SRC) $(ENGINE_OBJ) -o $@ $(LDFLAGS)
+$(CLI_BIN): $(CLI_SRC) $(CHAT_SRC) $(ENGINE_OBJ) | $(BIN)
+	$(CC) $(CFLAGS) $(INCLUDES) $(CLI_SRC) $(CHAT_SRC) $(ENGINE_OBJ) -o $@ $(LDFLAGS)
 
 $(BIN):
 	@mkdir -p $(BIN)
@@ -148,6 +153,9 @@ $(BIN)/test_st: tests/unit/test_st.c $(BUILD)/src/io/k3_st.o | $(BIN)
 # so they build and are verifiable on any machine, including one with no checkpoint.
 $(BIN)/test_tok: tests/unit/test_tok.c | $(BIN)
 	$(CC) -O2 -std=c99 $(WARN) -Wno-unused-function $(INCLUDES) $< -o $@
+
+$(BIN)/test_chat: tests/unit/test_chat.c src/chat/k3_chat.c src/chat/k3_sampler.c | $(BIN)
+	$(CC) $(CFLAGS) -Wno-unused-function $(INCLUDES) $^ -o $@ $(LDFLAGS)
 
 $(BIN)/test_cfg: tests/unit/test_cfg.c src/core/k3_ops.c | $(BIN)
 	$(CC) -O2 -std=c99 $(WARN) -Wno-unused-function $(INCLUDES) $^ -o $@ -lm
@@ -179,9 +187,10 @@ test: $(TEST_BINS)
 	      ./$(BIN)/test_tok $(TOK_FILES) roundtrip src/core/k3_ops.c; \
 	  else \
 	      echo "  NOT RUN: no tiktoken.model at $(TOK_FILES)"; \
-	      echo "           the vocabulary ships with the checkpoint, not with this"; \
-	      echo "           repository. Run: make tok TOK_FILES=/path/to/k3model"; \
-	  fi
+	          echo "           the vocabulary ships with the checkpoint, not with this"; \
+	          echo "           repository. Run: make tok TOK_FILES=/path/to/k3model"; \
+	 fi
+	@echo "== chat template =="; ./$(BIN)/test_chat $(FIXTURES)/chat/tokenizer
 	@echo "== real dimensions ==";   ./$(BIN)/scale_test
 	@echo "== full-model oracle =="; ./$(BIN)/k3_model $(FIXTURES)
 	@echo
@@ -239,8 +248,9 @@ debug:
 # point of a sanitizer run. OMP_CFLAGS is still omitted rather than replaced, so the
 # #pragma omp lines compile to nothing on every platform alike.
 asan:
-	$(MAKE) CFLAGS="-O1 -g -std=gnu99 $(WARN) -fsanitize=address,undefined -fno-omit-frame-pointer" \
-	        LDFLAGS="-lm -fsanitize=address,undefined" ARCH= all
+	$(MAKE) -B CFLAGS="-O1 -g -std=gnu99 $(WARN) -fsanitize=address,undefined -fno-omit-frame-pointer" \
+	        LDFLAGS="-lm -fsanitize=address,undefined" ARCH= all $(BIN)/test_chat
+	ASAN_OPTIONS=$(ASAN_RUN_OPTIONS) ./$(BIN)/test_chat $(FIXTURES)/chat/tokenizer
 
 ubsan:
 	$(MAKE) CFLAGS="-O1 -g -std=gnu99 $(WARN) -fsanitize=undefined" \

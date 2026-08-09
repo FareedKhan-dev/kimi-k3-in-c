@@ -41,6 +41,14 @@ MODIFICATIONS
   structures directly from the released tiktoken.model and tokenizer_config.json, so no
   intermediate tokenizer.json conversion step is required.
 
+  tests/fixtures/chat/encoding_k3.py,
+  tests/fixtures/chat/tokenizer/tiktoken.model, and
+  tests/fixtures/chat/tokenizer/tokenizer_config.json are non-weight artifacts copied
+  from moonshotai/Kimi-K3 at commit 9f62e4e9fffbd0a83ddd60e1c209d828994b3569 solely
+  as exact tokenizer/template test fixtures. Their upstream license is retained at
+  tests/fixtures/chat/LICENSE.kimi-k3 and the source pin plus SHA-256 values are in
+  tests/fixtures/chat/manifest.json.
+
 ================================================================================
 MODEL WEIGHTS
 ================================================================================

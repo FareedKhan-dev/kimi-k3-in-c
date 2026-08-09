@@ -1,0 +1,11 @@
+{
+  "upstream": "moonshotai/Kimi-K3",
+  "commit": "9f62e4e9fffbd0a83ddd60e1c209d828994b3569",
+  "purpose": "Official non-weight tokenizer and XTML template fixtures for weightless C chat tests.",
+  "files": {
+    "encoding_k3.py": "b9cb7ae100fed34b9337f80dacee5abbf7e261fe9b74bc0e76366701d46f5333",
+    "tokenizer/tiktoken.model": "b6c497a7469b33ced9c38afb1ad6e47f03f5e5dc05f15930799210ec050c5103",
+    "tokenizer/tokenizer_config.json": "5d0803c94db9cd78763499e0956c95fd5a225c14a727e5a6cf5db3f96f010a6e",
+    "LICENSE.kimi-k3": "20c797ce19af0c17de52c6afb144644768a591c521655f5ebf5712c9850f2887"
+  }
+}
