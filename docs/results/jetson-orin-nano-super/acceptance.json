@@ -1,0 +1,26 @@
+{
+  "hard_checks": {
+    "prompt tokenization": true,
+    "official 93-layer walk": true,
+    "no expert drops": true,
+    "exactly one generated token": true,
+    "exact token ID 17374": true,
+    "exact decoded token ' Paris'": true,
+    "ultra path active": true,
+    "peak RSS <= 6 GiB": true,
+    "trunk was read": true,
+    "experts were read": true,
+    "embedding was streamed": true,
+    "lm_head was streamed": true
+  },
+  "hard_pass": true,
+  "reference_token_id": 17374,
+  "reference_decoded": " Paris",
+  "reference_match": true,
+  "generated_ids": [
+    17374
+  ],
+  "generated_text": " Paris",
+  "semantic_reasonable": true,
+  "semantic_rule": "the single decoded token contains Paris, case-insensitive"
+}
