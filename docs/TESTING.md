@@ -77,6 +77,13 @@ out of it rather than restating it; without that file the parity run stops befor
 first case. The roundtrip leg in `make test` needs only `tiktoken.model` and
 `tokenizer_config.json`.
 
+**`test_chat`**, the official K3 XTML text-chat contract without weights. It uses a small
+checked-in copy of the official tokenizer artifacts, pinned with SHA-256 values in
+`tests/fixtures/chat/manifest.json`, and verifies rendered bytes and token ids, assistant
+reasoning preservation, control-marker injection resistance, the exact assistant turn
+terminator, strict JSONL round-trip/rejection, `/reset`, and fixed-seed PCG32 sampling.
+The fixture is tokenizer metadata only; it contains no model shards.
+
 **`k3_model`**, the end-to-end gate, on a tiny model whose tensor graph matches the released
 architecture exactly:
 

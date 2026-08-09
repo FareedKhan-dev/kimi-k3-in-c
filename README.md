@@ -86,9 +86,10 @@ $ ./bin/k3 ~/k3model --trunk ~/k3trunk --preset laptop \
 PEAK RSS for the whole run: 8.24 GB
 ```
 
-Slow, and answering correctly, in 8.24 GB, from a checkpoint of 1.56 TB. This is a base
-model, so what follows " Paris." is a continuation rather than a reply; there is no chat
-template. Give it more memory and the answer does not change, only the clock:
+Slow, and answering correctly, in 8.24 GB, from a checkpoint of 1.56 TB. This particular
+batch command deliberately asks for a raw continuation. The official Kimi K3 checkpoint
+is also chat-capable; use the XTML REPL below when you want answers and multi-turn history.
+Give the same batch request more memory and the answer does not change, only the clock:
 
 ```console
 $ ./bin/k3 ~/k3model --trunk ~/k3trunk --preset server \
@@ -375,8 +376,8 @@ run, but `--help`, `--version` and `--list-presets` work without it:
 
 ### Prompt options
 
-Exactly one of these is required. Passing none, or more than one, is a usage error
-(exit 2).
+Outside `--chat`, exactly one of these is required. Passing none, or more than one, is a
+usage error (exit 2).
 
 | flag | argument | |
 |---|---|---|
@@ -430,6 +431,46 @@ shorthand. Order matters if you mix them: a later flag wins, so
 entire prefix, which is *O(T²)*; with it, step 0 pays for the prompt and every later step
 costs the same fixed amount. Both paths are gated on producing identical tokens, so this
 is a pure speed choice.
+
+### Text chat (official Kimi K3 XTML)
+
+K3 is chat-capable. `--chat` uses the official XTML segments and tokenizer control tokens;
+it does not fall back to ChatML or a handwritten generic prompt. Version one is text-only:
+there are no tools, images, server, or context compaction.
+
+```bash
+./bin/k3 ~/k3model --trunk ~/k3trunk --preset desktop --tok ~/k3model \
+  --chat --system "You are a helpful assistant." \
+  --history my-session.jsonl --incremental
+```
+
+The REPL accepts ordinary text plus `/help`, `/reset`, and `/exit`. It prints the complete
+canonical record, including `<think>…</think>` and `<response>…</response>`. When
+`--history` is supplied, it writes a portable, human-readable JSONL file such as:
+
+```json
+{"role":"system","content":"You are a helpful assistant."}
+{"role":"user","content":"Explain cache locality."}
+{"role":"assistant","content":"…","reasoning_content":"…"}
+```
+
+Treat that file as sensitive: it can contain every user message and the complete assistant
+reasoning record, which K3 requires to continue a conversation faithfully. On restart the
+engine validates, re-renders, and re-prefills the transcript; it deliberately does not
+serialize opaque KV, MLA, or KDA state. A supplied `--system` must exactly match an existing
+initial system record. Literal control-marker text in user messages is encoded as ordinary
+text, never as an XTML control token.
+
+Chat defaults to `--gen 4096`, temperature `1.0`, and top-p `0.95`; batch generation stays
+greedy with its existing eight-token default. `--greedy` makes chat argmax too. Sampling uses
+PCG32; `--seed N` deterministically derives one stream per assistant turn, so replaying the
+same transcript with the same seed is reproducible. The 32K prompt / 4096 generation limits
+are existing engine limits, not new chat limits; chat fails clearly and retains the history
+when either context or safe KV allocation is reached.
+
+Chat uses the same CPU-only streamed trunk and routed-expert cache as batch mode. `--preset`,
+`--trunk-gb`, and `--cache-gb` keep exactly their existing meanings: no experts are preloaded
+and the trunk remains disk-streamed unless those existing memory flags ask otherwise.
 
 ### Diagnostic options
 
@@ -2826,8 +2867,8 @@ arithmetic and no evidence at all about output quality.
 
 **Paris.** The first token out of a 2.78 trillion parameter model running on a CPU in a few
 gigabytes of RAM is the right answer. The trailing quote and the "The Eiffel" continuation
-are not a defect: with no chat template and no instruction tuning in the loop, this is a
-base model continuing text. It has decided it is inside a JSON list of sentences about
+are not a defect: that raw-completion test supplies no XTML chat turn, so the model is
+continuing text. It has decided it is inside a JSON list of sentences about
 France, and it is continuing that list.
 
 ```text
@@ -3349,9 +3390,11 @@ Raw data: [`docs/data/trunk-quantisation.txt`](docs/data/trunk-quantisation.txt)
 
 ## Scope
 
-- **No chat template.** Base model continuations, not replies.
-- **Greedy decoding only.** No temperature, no top-p, no top-k. Greedy is what keeps the
-  output identical across budgets.
+- **Text-only XTML chat.** K3 system/user/assistant conversations and their reasoning
+  history are supported. Tools, vision/image parts, HTTP serving, and context compaction are
+  not yet supported.
+- **Batch remains greedy.** Its outputs remain identical across memory budgets. Chat alone
+  adds opt-in temperature/top-p sampling and `--greedy`.
 - **No chunked prefill.** The ceiling is 32,768 tokens, but a 21,000 token prompt is one
   quadratic pass.
 - **Context is bounded by memory, not by the engine.**
