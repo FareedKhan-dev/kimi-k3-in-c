@@ -121,11 +121,22 @@ jobs:
       # safetensors parser and the streaming cache in scope precisely because they read
       # attacker-influenceable bytes: a hand-written binary parser and an O_DIRECT slot
       # allocator are where an out-of-bounds read actually lives.
+      #
+      # bench_kernels is here for coverage, not for timing. k3_matmul_mxfp4 was reachable
+      # from no instrumented binary in this job: the MoE only takes its nibble-reading
+      # branch when w->src is a real expert source, and every fixture leaves src NULL and
+      # runs the fp32 path instead, so the one kernel that indexes packed 4-bit weights
+      # against a separate scale array went unchecked. test_expert does exercise it but
+      # needs checkpoint bytes, which CI does not have. bench_kernels reaches it with
+      # synthetic data and no weights, which makes it the only way to get it under ASan
+      # here. It also covers k3_matmul_bf16 at full width; test_ops already checks that
+      # one, but at n=129 rather than 12288x7168.
       - name: Build instrumented tests
         run: |
           make CFLAGS="-O1 -g -std=gnu99 -Wall -Wextra -fsanitize=address,undefined -fno-omit-frame-pointer" \
                LDFLAGS="-lm -fsanitize=address,undefined" ARCH= \
                bin/test_ops bin/test_cfg bin/test_cache bin/test_st bin/k3_model \
+               bin/bench_kernels \
                -j"$(nproc)"
       - name: Run under sanitizers
         env:
@@ -141,6 +152,27 @@ jobs:
           ./bin/test_st tests/fixtures/st "$RUNNER_TEMP/idx.json" \
             plain.f32.2d plain.bf16.1d tricky.f16.1d packed.u8.2d scalar.f32 second.shard.f32
           ./bin/k3_model tests/fixtures
+          # The ms and GFLOP/s it prints are meaningless under -O1 with ASan interceptors
+          # on every load. It is run for what ASan sees, not for what it reports.
+          ./bin/bench_kernels
+
+      # Everything above builds the SCALAR fallbacks. Overriding CFLAGS drops $(ARCH)
+      # from the command line, so no -m flag reaches the compiler and __AVX2__ is
+      # undefined -- the `ARCH=` above is already a no-op for that reason. That leaves
+      # every _mm256_* path in k3_ops.c uninstrumented, and those are the ones that ship
+      # and the ones doing the unaligned loads and hand-computed offsets worth checking.
+      # Rebuilding just bench_kernels with the documented baseline covers both vector
+      # kernels for the cost of one more compile.
+      - name: Re-run the vector paths under sanitizers
+        env:
+          ASAN_OPTIONS: detect_leaks=0:abort_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: |
+          make clean
+          make CFLAGS="-O1 -g -std=gnu99 -Wall -Wextra -mavx2 -mfma -fsanitize=address,undefined -fno-omit-frame-pointer" \
+               LDFLAGS="-lm -fsanitize=address,undefined" \
+               bin/bench_kernels -j"$(nproc)"
+          ./bin/bench_kernels
 
   # The tokenizer is portable C99 and must agree with the reference implementation
   # token-for-token. A tokenizer that is merely "close" corrupts every prompt silently.
