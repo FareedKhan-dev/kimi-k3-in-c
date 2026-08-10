@@ -120,8 +120,20 @@ static int real_cfg(K3Cfg *c, int *fa, int fa_max,
     return 1;
 }
 
+static float g_temp = 0.0f;
+static float g_top_p = 1.0f;
+static int g_top_k = 0;
+static uint64_t g_seed = 42;
+
 static int argmax_(const float *v, int n)
 { int b = 0; for (int i = 1; i < n; i++) if (v[i] > v[b]) b = i; return b; }
+
+static int select_token(const float *v, int n)
+{
+    if (g_temp <= 0.0f) return argmax_(v, n);
+    return k3_sample(v, n, g_temp, g_top_p, g_top_k, &g_seed);
+}
+
 
 /* ------------------------------------------------------- conversation state ----
  * Everything the engine carries between tokens, on disk. The point is turn two of a
@@ -347,6 +359,12 @@ static void usage(FILE *f)
 "                        verified position costs ~22%% of a serial token when the trunk\n"
 "                        streams, so repetitive text decodes up to several times faster\n"
 "  --tok DIR             directory with tiktoken.model and tokenizer_config.json\n"
+"\n"
+"sampling (optional, greedy by default):\n"
+"  --temp X, --temperature X  sampling temperature (default 0.0, greedy)\n"
+"  --top-p X                  nucleus sampling threshold (default 1.0)\n"
+"  --top-k N                  top-K sampling pool size (default 0, disabled)\n"
+"  --seed N                   random seed for sampling (default 42)\n"
 "\n"
 "diagnostics:\n"
 "  --config PATH         model config; defaults to <model_dir>/config.json\n"
@@ -609,6 +627,10 @@ int main(int argc, char **argv)
             if (!strcmp(v, "auto")) budget_auto = 1;
             else { trunk_gb = atof(v); budget_auto = 0; }
         }
+        else if ((!strcmp(argv[i], "--temp") || !strcmp(argv[i], "--temperature")) && i + 1 < argc) g_temp = (float)atof(argv[++i]);
+        else if (!strcmp(argv[i], "--top-p") && i + 1 < argc) g_top_p = (float)atof(argv[++i]);
+        else if (!strcmp(argv[i], "--top-k") && i + 1 < argc) g_top_k = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--seed") && i + 1 < argc) g_seed = strtoull(argv[++i], NULL, 10);
         else if (!strcmp(argv[i], "--incremental")) incremental = 1;
         else if (!strcmp(argv[i], "--dump-logits") && i + 1 < argc) logits_path = argv[++i];
         else if (!strcmp(argv[i], "--dump-cache-trace") && i + 1 < argc) trace_dir = argv[++i];
@@ -1205,7 +1227,7 @@ int main(int argc, char **argv)
             const int base = w.cached;
             const int nT0 = T - base;
             frc = forward(&w, &c, &cache, seq + base, nT0, lg, sc, h, br, ks, NULL);
-            if (frc == 0) { w.cached = base + nT0; emit[emitn++] = argmax_(lg, c.vocab); }
+            if (frc == 0) { w.cached = base + nT0; emit[emitn++] = select_token(lg, c.vocab); }
             /* The draft model must absorb the same context, or its first proposals
              * come from a shorter one; one draft sweep, paid once. Saved state does
              * not include the draft's, so a resumed run replays the WHOLE sequence
@@ -1294,7 +1316,7 @@ int main(int argc, char **argv)
                 }
             } else {
                 frc = forward(&w, &c, &cache, seq + base, 1, lg, sc, h, br, ks, NULL);
-                if (frc == 0) { w.cached = base + 1; emit[emitn++] = argmax_(lg, c.vocab); }
+                if (frc == 0) { w.cached = base + 1; emit[emitn++] = select_token(lg, c.vocab); }
                 /* keep the draft in lockstep through non-drafted steps */
                 if (dw.trunk && frc == 0) {
                     if (forward(&dw, &c, &cache, seq + base, 1, lg, sc, h, br,
@@ -1304,7 +1326,7 @@ int main(int argc, char **argv)
             }
         } else {
             frc = forward(&w, &c, &cache, seq, T, lg, sc, h, br, ks, NULL);
-            if (frc == 0) emit[emitn++] = argmax_(lg, c.vocab);
+            if (frc == 0) emit[emitn++] = select_token(lg, c.vocab);
         }
         /* Abort the run rather than argmax a buffer the forward never wrote. */
         if (frc != 0 || emitn == 0) {

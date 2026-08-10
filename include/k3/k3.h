@@ -250,6 +250,22 @@ void k3_router(int *idx, float *w, const float *x, const float *W,
 void k3_attn_res(float *out, const float *src, const float *fold,
                  int nsrc, int n, float eps);
 
+/* Sample a token index from a logit distribution.
+ *
+ * Parameters:
+ *   logits       : array of n float logits (e.g. vocab size)
+ *   n            : vocabulary size
+ *   temp         : temperature (<= 0.0f or < 1e-6f defaults to greedy argmax)
+ *   top_p        : nucleus sampling threshold in (0.0, 1.0]; <= 0.0 or >= 1.0 disables top_p
+ *   top_k        : top-K filtering; <= 0 or >= n disables top_k
+ *   rng_state    : pointer to uint64_t PRNG state (updated in place)
+ *
+ * Returns:
+ *   The sampled token index in [0, n - 1].
+ */
+int k3_sample(const float *logits, int n, float temp, float top_p, int top_k, uint64_t *rng_state);
+
+
 /* ---- weight storage format -------------------------------------------------------
  * The always-active weights ship as bf16 and total 113.49 GB; held as fp32 they are
  * ~227 GB (see the three figures at the top of this file). Since these

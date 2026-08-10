@@ -459,10 +459,15 @@ void k3_router(int *idx, float *w, const float *x, const float *W,
 void k3_attn_res(float *out, const float *src, const float *fold,
                  int nsrc, int n, float eps)
 {
+    if (nsrc <= 0) {
+        for (int i = 0; i < n; i++) out[i] = 0.0f;
+        return;
+    }
     /* Returning early would leave `out` holding the previous layer's residual, which
      * the caller cannot distinguish from a computed one. */
     float *score = (float *)malloc((size_t)nsrc * sizeof(float));
     if (!score) k3_fatal_oom("AttnRes scores", (size_t)nsrc * sizeof(float));
+    score[0] = 0.0f;
 
     for (int s = 0; s < nsrc; s++) {
         const float *v = src + (size_t)s * n;
@@ -488,6 +493,105 @@ void k3_attn_res(float *out, const float *src, const float *fold,
     }
     free(score);
 }
+
+/* ------------------------------------------------------------- Sampling ---- */
+typedef struct {
+    int id;
+    float val;
+} K3TokenVal;
+
+static int k3_token_val_cmp(const void *a, const void *b)
+{
+    const float va = ((const K3TokenVal *)a)->val;
+    const float vb = ((const K3TokenVal *)b)->val;
+    return (va < vb) - (va > vb); /* Descending order */
+}
+
+static uint64_t k3_xorshift64(uint64_t *state)
+{
+    uint64_t x = *state;
+    if (x == 0) x = 88172645463325252ULL;
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    *state = x;
+    return x;
+}
+
+int k3_sample(const float *logits, int n, float temp, float top_p, int top_k, uint64_t *rng_state)
+{
+    if (n <= 0) return 0;
+    if (temp <= 0.0f || temp < 1e-6f || top_k == 1) {
+        int best = 0;
+        for (int i = 1; i < n; i++) {
+            if (logits[i] > logits[best]) best = i;
+        }
+        return best;
+    }
+
+    K3TokenVal *items = (K3TokenVal *)malloc((size_t)n * sizeof(K3TokenVal));
+    if (!items) k3_fatal_oom("sample items", (size_t)n * sizeof(K3TokenVal));
+
+    const float inv_temp = 1.0f / temp;
+    float max_val = logits[0] * inv_temp;
+    for (int i = 0; i < n; i++) {
+        const float scaled = logits[i] * inv_temp;
+        items[i].id = i;
+        items[i].val = scaled;
+        if (scaled > max_val) max_val = scaled;
+    }
+
+    qsort(items, (size_t)n, sizeof(K3TokenVal), k3_token_val_cmp);
+
+    int pool_size = n;
+    if (top_k > 0 && top_k < pool_size) {
+        pool_size = top_k;
+    }
+
+    float *probs = (float *)malloc((size_t)pool_size * sizeof(float));
+    if (!probs) k3_fatal_oom("sample probs", (size_t)pool_size * sizeof(float));
+
+    double sum_p = 0.0;
+    for (int i = 0; i < pool_size; i++) {
+        const float p = expf(items[i].val - max_val);
+        probs[i] = p;
+        sum_p += p;
+    }
+
+    if (top_p > 0.0f && top_p < 1.0f && sum_p > 0.0) {
+        const double p_thresh = (double)top_p * sum_p;
+        double cum_p = 0.0;
+        int cutoff = 0;
+        for (int i = 0; i < pool_size; i++) {
+            cum_p += probs[i];
+            cutoff = i;
+            if (cum_p >= p_thresh) break;
+        }
+        pool_size = cutoff + 1;
+        sum_p = cum_p;
+    }
+
+    uint64_t dummy_rng = 42;
+    uint64_t *rng = rng_state ? rng_state : &dummy_rng;
+    const uint64_t r_raw = k3_xorshift64(rng);
+    const double u = (double)(r_raw & 0xFFFFFFFFFFFFFFULL) / (double)0x0100000000000000ULL;
+    const double target = u * sum_p;
+
+    double cum = 0.0;
+    int selected = items[0].id;
+    for (int i = 0; i < pool_size; i++) {
+        cum += probs[i];
+        if (target <= cum || i == pool_size - 1) {
+            selected = items[i].id;
+            break;
+        }
+    }
+
+    free(probs);
+    free(items);
+    return selected;
+}
+
 
 /* Exact scratch requirement for k3_mla. Callers should use this rather than
  * duplicating the arithmetic; getting it wrong overruns silently. */

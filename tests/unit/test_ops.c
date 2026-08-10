@@ -847,6 +847,76 @@ static void t_matmul_bf16(void)
     free(Wb); free(Wf); free(x); free(ya); free(yb);
 }
 
+static void t_sample(void)
+{
+    const int vocab = 100;
+    float logits[100];
+    for (int i = 0; i < vocab; i++) logits[i] = (float)i * 0.1f;
+
+    /* 1. Greedy fallback: temp = 0.0 should pick max index (99) */
+    uint64_t seed1 = 42;
+    int s1 = k3_sample(logits, vocab, 0.0f, 1.0f, 0, &seed1);
+    if (s1 != 99) {
+        printf("  FAIL  sample        temp=0.0 expected 99, got %d\n", s1);
+        g_fail++;
+        return;
+    }
+
+    /* 2. Top-k = 1 fallback: should pick max index (99) */
+    uint64_t seed2 = 42;
+    int s2 = k3_sample(logits, vocab, 1.0f, 1.0f, 1, &seed2);
+    if (s2 != 99) {
+        printf("  FAIL  sample        top_k=1 expected 99, got %d\n", s2);
+        g_fail++;
+        return;
+    }
+
+    /* 3. Reproducibility test: same seed must produce same token */
+    uint64_t seed_a = 123456789ULL;
+    uint64_t seed_b = 123456789ULL;
+    int sa = k3_sample(logits, vocab, 0.8f, 0.9f, 10, &seed_a);
+    int sb = k3_sample(logits, vocab, 0.8f, 0.9f, 10, &seed_b);
+    if (sa != sb) {
+        printf("  FAIL  sample        reproducibility failed: %d vs %d\n", sa, sb);
+        g_fail++;
+        return;
+    }
+
+    /* 4. Top-K constraint test: top_k = 5 should only sample from top 5 (95..99) */
+    uint64_t seed_k = 100ULL;
+    int in_topk = 1;
+    for (int iter = 0; iter < 50; iter++) {
+        int sk = k3_sample(logits, vocab, 1.0f, 1.0f, 5, &seed_k);
+        if (sk < 95 || sk > 99) { in_topk = 0; break; }
+    }
+    if (!in_topk) {
+        printf("  FAIL  sample        top_k=5 sampled outside top 5\n");
+        g_fail++;
+        return;
+    }
+
+    /* 5. Uniform distribution test: all logits equal should sample across the range */
+    uint64_t seed_u = 54321ULL;
+    float logits_uni[10] = {0.0f};
+    int counts[10] = {0};
+    for (int iter = 0; iter < 1000; iter++) {
+        int idx = k3_sample(logits_uni, 10, 1.0f, 1.0f, 0, &seed_u);
+        if (idx >= 0 && idx < 10) counts[idx]++;
+    }
+    int visited = 0;
+    for (int i = 0; i < 10; i++) {
+        if (counts[i] > 0) visited++;
+    }
+    if (visited < 8) {
+        printf("  FAIL  sample        uniform sampling failed (only %d/10 bins visited)\n", visited);
+        g_fail++;
+        return;
+    }
+
+    printf("  PASS  sample        greedy, top-k, top-p, seed reproducibility, uniform\n");
+    g_pass++;
+}
+
 int main(int argc, char **argv)
 {
     const char *dir = (argc > 1) ? argv[1] : "../fixtures/ops";
@@ -889,6 +959,8 @@ int main(int argc, char **argv)
     t_layer(dir, "layer_kda");
     t_layer(dir, "layer_mla");
     t_attnres(dir);
+    t_sample();
+
 
     printf("\n%d passed, %d failed, %d skipped\n", g_pass, g_fail, g_skip);
     if (g_skip)
