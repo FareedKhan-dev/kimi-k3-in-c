@@ -119,6 +119,10 @@ void k3_situ_glu(float *y, const float *x, int n, float b1, float b2)
     }
 }
 
+/* Automatic-storage bound for the k3_kda_step temporary. K3 uses kda_head_dim 128; the
+ * heap fallback keeps a larger configuration slower, never wrong. */
+#define K3_KDA_STEP_DV 256
+
 /* ------------------------------------------------------------- ShortConv ---- */
 /* Causal depthwise conv, SiLU fused, exactly as ShortConvolution(activation='silu').
  * state[c*(k-1) + j] holds the previous inputs for channel c, oldest first.
@@ -190,9 +194,24 @@ void k3_kda_step(float *S, float *o, const float *q, const float *k,
     /* 2. read the state along k:  u = S^T k */
     /* Allocated AFTER the decay above has already modified S. Returning early here
      * would leave the recurrent state permanently scaled but never updated -- silent,
-     * unrecoverable corruption of every subsequent token. */
-    float *u = (float *)calloc((size_t)dv, sizeof(float));
-    if (!u) k3_fatal_oom("KDA recurrence temporary", (size_t)dv * sizeof(float));
+     * unrecoverable corruption of every subsequent token.
+     *
+     * AUTOMATIC STORAGE at the sizes that occur. This is the innermost call in the
+     * engine: once per head per token per KDA layer, which at K3 scale is 96 x 69 =
+     * 6,624 calls per token, and k3_kda_layer runs them from an OpenMP loop, so a heap
+     * temporary here is 6,624 malloc/free pairs per token with sixteen threads
+     * contending for the allocator. dv is 128 for K3, so the array below covers it and
+     * the heap path is dead code in practice. */
+    float  ubuf[K3_KDA_STEP_DV];
+    float *uheap = NULL;
+    float *u = ubuf;
+    if (dv > K3_KDA_STEP_DV) {
+        uheap = (float *)calloc((size_t)dv, sizeof(float));
+        if (!uheap) k3_fatal_oom("KDA recurrence temporary", (size_t)dv * sizeof(float));
+        u = uheap;
+    } else {
+        for (int j = 0; j < dv; j++) u[j] = 0.0f;   /* calloc's zeroing, explicitly */
+    }
     for (int i = 0; i < dk; i++) {
         const float ki = k[i];
         if (ki == 0.0f) continue;
@@ -217,7 +236,7 @@ void k3_kda_step(float *S, float *o, const float *q, const float *k,
         const float *row = S + (size_t)i * dv;
         for (int j = 0; j < dv; j++) o[j] += qi * row[j];
     }
-    free(u);
+    free(uheap);                                  /* free(NULL) is a no-op */
 }
 
 /* ---------------------------------------------------------------- matmul ---- */
