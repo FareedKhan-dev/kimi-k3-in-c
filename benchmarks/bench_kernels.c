@@ -36,7 +36,11 @@ static double now_s(void)
  * proof that a vector path is bit-identical rather than merely close. A tolerance check
  * would happily pass a kernel that quietly reassociated the reduction, which is exactly
  * the mistake worth catching: this engine's claim is that its output equals the
- * reference, and "equals" has to mean equals. */
+ * reference, and "equals" has to mean equals.
+ *
+ * This only means anything while the inputs are FINITE. NaN compares unequal to itself
+ * and carries a payload that propagates differently through scalar and vector code, so
+ * a NaN input turns this from a proof into a guaranteed false alarm. See fillbf16. */
 static void fnv(const char *label, const float *v, int n)
 {
     unsigned long long h = 1469598103934665603ull;
@@ -62,6 +66,28 @@ static void fillb(unsigned char *p, size_t n, unsigned s)
     }
 }
 
+/* bf16 weights that are FINITE, which fillb cannot promise.
+ *
+ * Random bytes reinterpreted as bf16 hit the all-ones exponent about one time in 256,
+ * so a 7168-term row is NaN with probability 1 - (255/256)^7168, i.e. essentially
+ * always. Every output of the bf16 section then comes out NaN, and hashing NaN compares
+ * PAYLOADS rather than arithmetic: those propagate differently through libm's fma() and
+ * through _mm256_fmadd_pd, so the two builds disagree unconditionally and the check
+ * described above reports a bit-identity failure that is not there.
+ *
+ * Same xorshift and the same distribution as fillf, truncated to the top half, which is
+ * what bf16 storage is. No intermediate float array: at 12288 x 7168 that would be a
+ * 352 MB temporary for values consumed once. */
+static void fillbf16(uint16_t *p, size_t n, unsigned s)
+{
+    for (size_t i = 0; i < n; i++) {
+        s ^= s << 13; s ^= s >> 17; s ^= s << 5;
+        const float f = ((float)(s >> 8) / 8388608.0f - 1.0f) * 0.05f;
+        unsigned u; memcpy(&u, &f, sizeof u);
+        p[i] = (unsigned short)(u >> 16);
+    }
+}
+
 int main(void)
 {
     printf("kernel benchmark at REAL Kimi K3 dimensions\n");
@@ -78,7 +104,7 @@ int main(void)
         float *x = (float *)malloc((size_t)in * sizeof(float));
         float *y = (float *)malloc((size_t)out * sizeof(float));
         if (!W || !x || !y) { printf("alloc failed\n"); return 1; }
-        fillb((unsigned char *)W, (size_t)in * out * 2, 12345u);
+        fillbf16(W, (size_t)in * out, 12345u);
         fillf(x, in, 999u);
 
         k3_matmul_bf16(y, x, W, in, out);              /* warm */
