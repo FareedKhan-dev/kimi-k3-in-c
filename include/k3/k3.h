@@ -351,6 +351,18 @@ typedef struct K3ExpertSrc {
      * out when non-NULL. The draft model's cache-only routing uses this to propose tokens
      * with zero expert I/O. May be NULL; callers must cope. */
     int (*resident)(struct K3ExpertSrc *self, int layer, int expert, K3ExpertQ *out);
+    /* OPTIONAL: called when the MoE ENTERS a layer, before the router has run on the
+     * current hidden state. The source may use it to start reads for whatever it expects
+     * this layer to want -- the cache guesses the previous token's top-k, because about
+     * 90% of expert requests in a real trace are repeats.
+     *
+     * It must NOT block: the whole point is that the reads overlap the router and the
+     * down-projection, which are the only substantial arithmetic between entering the
+     * layer and needing the experts. A source with nothing to say leaves it NULL.
+     *
+     * ZERO THIS FIELD, like getmany and resident. It is a function pointer in a struct
+     * callers build on the stack. */
+    void (*speculate)(struct K3ExpertSrc *self, int layer);
     void *ctx;
 } K3ExpertSrc;
 

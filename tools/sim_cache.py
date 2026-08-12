@@ -11,11 +11,14 @@ THE IDEA
     capacity under any policy.
 
 WHAT IT REPORTS
-    LRU      what the engine actually implements.
+    LRU      what the engine used to implement, kept as the baseline the change is
+             measured against.
+    S3-FIFO  what the engine implements now (src/cache/k3_cache.c). Small FIFO, main
+             FIFO, ghost queue; see the note on the function.
     Belady   the optimal offline policy, which no real cache can beat. The gap between
-             the two is the most a cleverer replacement policy could ever be worth. If
-             the gap is small, effort belongs in prefetching or pinning, not in
-             replacement.
+             LRU and Belady is what said the lever was the policy rather than the size:
+             25.5 points at 64 GB on the published trace. S3-FIFO is the attempt to
+             close some of it, and this is where that attempt is checked.
     Pinned   the hottest N experts held permanently, LRU for the rest. This is what the
              usage histogram is for.
 
@@ -25,7 +28,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from collections import OrderedDict, Counter
+from collections import Counter, OrderedDict, deque
 
 import numpy as np
 
@@ -73,6 +76,76 @@ def belady(trace, cap):
                 continue
             del resident[victim]
         resident[k] = nxt[i]
+    return hits
+
+
+def s3fifo(trace, cap, small_frac=0.1):
+    """S3-FIFO, the policy src/cache/k3_cache.c actually implements.
+
+    Kept here as well as in C for one reason: this is where the decision to replace LRU
+    was made, and a claim about a policy that can only be checked by re-running the model
+    is not a claim anybody can check. Replaying the same trace through both is cheap, and
+    the gap it reports is the gap the engine should show.
+
+    Three structures, and the split is the whole idea:
+      S  a small FIFO taking every new admission, so one-hit wonders leave quickly
+         without ever reaching the main cache. K3's routing produces a lot of them.
+      M  the main FIFO, holding objects that earned a place by being touched again.
+      G  a ghost FIFO of KEYS evicted from S, so a prompt return skips the probation.
+
+    Frequency is a saturating 2-bit counter, not a recency order -- which is what makes
+    it cheaper than LRU as well as better on this trace.
+    """
+    small = max(1, int(cap * small_frac))
+    S, M = deque(), deque()
+    G, Gset = deque(), set()
+    freq = {}
+    resident = set()
+    hits = 0
+
+    def evict():
+        while True:
+            # Take from S while it is over its share, and also when M has nothing to
+            # give -- otherwise a small S with an empty M spins here forever, which the
+            # C side hits as a failed admission rather than a hang.
+            if S and (len(S) >= small or not M):
+                v = S.popleft()
+                if freq.get(v, 0) > 0:
+                    freq[v] = 0
+                    M.append(v)
+                    continue
+                resident.discard(v)
+                freq.pop(v, None)
+                if len(G) >= cap:
+                    Gset.discard(G.popleft())
+                G.append(v)
+                Gset.add(v)
+                return
+            if M:
+                v = M.popleft()
+                if freq.get(v, 0) > 0:
+                    freq[v] -= 1
+                    M.append(v)
+                    continue
+                resident.discard(v)
+                freq.pop(v, None)
+                return
+            return                # nothing resident at all
+
+    for k in trace:
+        if k in resident:
+            hits += 1
+            freq[k] = min(freq.get(k, 0) + 1, 3)
+            continue
+        if len(resident) >= cap:
+            evict()
+        freq[k] = 0
+        resident.add(k)
+        if k in Gset:
+            Gset.discard(k)
+            M.append(k)
+        else:
+            S.append(k)
     return hits
 
 
@@ -145,28 +218,34 @@ def main():
           % (reuse, n, 100.0 * reuse / n))
 
     caps_gb = [8, 16, 32, 64, 128, 192, 256, 384, 512, 768, 1024, 1450]
-    print("%-9s %8s %9s %9s %9s %12s %11s" %
-          ("CACHE", "SLOTS", "LRU", "BELADY", "PIN+LRU", "GB READ/TOK", "SEC/TOK"))
-    print("-" * 76)
+    print("%-9s %8s %9s %9s %9s %9s %12s %11s" %
+          ("CACHE", "SLOTS", "LRU", "S3-FIFO", "BELADY", "PIN+LRU",
+           "GB READ/TOK", "SEC/TOK"))
+    print("-" * 86)
     for gb in caps_gb:
         cap = int(gb * 1e9 // a.expert_bytes)
         if cap < 17:
             continue
         h = lru(trace, cap)
+        s3 = s3fifo(trace, cap)
         b = belady(trace, cap)
         p = pinned_lru(trace, cap, cap // 2)
-        miss = n - h
+        # The read column follows the policy the engine RUNS, which is S3-FIFO. Quoting
+        # LRU's miss count beside a table whose point is that LRU was replaced would
+        # describe a configuration nobody uses.
+        miss = n - s3
         gb_tok = miss * a.expert_bytes / 1e9 / ntok
         sec = gb_tok * 1000.0 / a.disk_mbs
-        print("%-9s %8d %8.2f%% %8.2f%% %8.2f%% %12.2f %11.2f"
-              % ("%d GB" % gb, cap, 100.0 * h / n, 100.0 * b / n, 100.0 * p / n,
-                 gb_tok, sec))
-    print("-" * 76)
-    print("SEC/TOK is expert I/O only, at the measured %.0f MB/s random-cold rate.\n"
+        print("%-9s %8d %8.2f%% %8.2f%% %8.2f%% %8.2f%% %12.2f %11.2f"
+              % ("%d GB" % gb, cap, 100.0 * h / n, 100.0 * s3 / n, 100.0 * b / n,
+                 100.0 * p / n, gb_tok, sec))
+    print("-" * 86)
+    print("SEC/TOK is expert I/O only, at the measured %.0f MB/s random-cold rate, and\n"
+          "follows the S3-FIFO column because that is the policy the engine runs.\n"
           "It excludes compute, which overlaps with it in a real serving loop."
           % a.disk_mbs)
     print("BELADY and PIN+LRU both use future knowledge, so they are ceilings rather\n"
-          "than achievable policies. LRU is what the engine actually does.")
+          "than achievable policies. S3-FIFO is what the engine does; LRU is what it did.")
     comp = uniq
     print("compulsory misses: %d (every expert must be read at least once), a ceiling of\n"
           "%.2f%% hit rate for ANY policy at ANY size on this trace."
