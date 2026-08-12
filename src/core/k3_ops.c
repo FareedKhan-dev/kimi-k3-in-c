@@ -14,7 +14,10 @@
  *     output rows, so it introduces no reduction and changes no arithmetic,
  *   - the AVX2 path (guarded by __AVX2__), which reproduces the scalar code's
  *     four-accumulator partition and reduction tree exactly rather than choosing a
- *     more natural one.
+ *     more natural one,
+ *   - the NEON path (guarded by __ARM_NEON on aarch64), which maps the same scalar
+ *     accumulators onto 2-lane double vectors, element i in the same accumulator and
+ *     the same reduction tree, so it is bound by the identical bit-exactness contract.
  *
  * That last point is the reason several loops here look hand-unrolled for no visible
  * gain: the unrolling fixes a summation ORDER that the vector path must match. Reduce
@@ -1032,6 +1035,9 @@ static const float K3_E2M1[16] = {
 #if defined(__AVX2__)
 #include <immintrin.h>
 #endif
+#if defined(__ARM_NEON) && defined(__aarch64__)
+#include <arm_neon.h>
+#endif
 
 /* y[out] = W[out][in] . x[in], with W stored as bf16 and widened on read.
  *
@@ -1109,6 +1115,51 @@ void k3_matmul_bf16(float *y, const float *x, const uint16_t *W, int in, int out
             _mm256_storeu_pd(a, vt);
             acc = (a[0] + a[1]) + (a[2] + a[3]);
         }
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+        {
+            /* Eight 2-lane double accumulators: wk holds the scalar path's
+             * {a[2k], a[2k+1]}, so element i lands in accumulator i%16 exactly as in
+             * the scalar and AVX2 forms, and vfmaq_f64 per lane is the same IEEE fma()
+             * in double. bf16 -> f32 is the usual 16-bit left shift; vshll_n_u16
+             * widens and shifts in one instruction. */
+            float64x2_t w0 = vdupq_n_f64(0.0), w1 = vdupq_n_f64(0.0);
+            float64x2_t w2 = vdupq_n_f64(0.0), w3 = vdupq_n_f64(0.0);
+            float64x2_t w4 = vdupq_n_f64(0.0), w5 = vdupq_n_f64(0.0);
+            float64x2_t w6 = vdupq_n_f64(0.0), w7 = vdupq_n_f64(0.0);
+            for (; i + 15 < in; i += 16) {
+                const uint16x8_t h0 = vld1q_u16(row + i);
+                const uint16x8_t h1 = vld1q_u16(row + i + 8);
+                const float32x4_t f0 =
+                    vreinterpretq_f32_u32(vshll_n_u16(vget_low_u16(h0), 16));
+                const float32x4_t f1 =
+                    vreinterpretq_f32_u32(vshll_n_u16(vget_high_u16(h0), 16));
+                const float32x4_t f2 =
+                    vreinterpretq_f32_u32(vshll_n_u16(vget_low_u16(h1), 16));
+                const float32x4_t f3 =
+                    vreinterpretq_f32_u32(vshll_n_u16(vget_high_u16(h1), 16));
+                const float32x4_t x0 = vld1q_f32(x + i);
+                const float32x4_t x1 = vld1q_f32(x + i + 4);
+                const float32x4_t x2 = vld1q_f32(x + i + 8);
+                const float32x4_t x3 = vld1q_f32(x + i + 12);
+                w0 = vfmaq_f64(w0, vcvt_f64_f32(vget_low_f32(f0)),
+                                   vcvt_f64_f32(vget_low_f32(x0)));
+                w1 = vfmaq_f64(w1, vcvt_high_f64_f32(f0), vcvt_high_f64_f32(x0));
+                w2 = vfmaq_f64(w2, vcvt_f64_f32(vget_low_f32(f1)),
+                                   vcvt_f64_f32(vget_low_f32(x1)));
+                w3 = vfmaq_f64(w3, vcvt_high_f64_f32(f1), vcvt_high_f64_f32(x1));
+                w4 = vfmaq_f64(w4, vcvt_f64_f32(vget_low_f32(f2)),
+                                   vcvt_f64_f32(vget_low_f32(x2)));
+                w5 = vfmaq_f64(w5, vcvt_high_f64_f32(f2), vcvt_high_f64_f32(x2));
+                w6 = vfmaq_f64(w6, vcvt_f64_f32(vget_low_f32(f3)),
+                                   vcvt_f64_f32(vget_low_f32(x3)));
+                w7 = vfmaq_f64(w7, vcvt_high_f64_f32(f3), vcvt_high_f64_f32(x3));
+            }
+            /* (a[l]+a[4+l])+(a[8+l]+a[12+l]) lanewise -- t0 = {b0,b1}, t1 = {b2,b3} --
+             * then (b0+b1)+(b2+b3): the scalar reduction tree exactly. */
+            const float64x2_t t0 = vaddq_f64(vaddq_f64(w0, w2), vaddq_f64(w4, w6));
+            const float64x2_t t1 = vaddq_f64(vaddq_f64(w1, w3), vaddq_f64(w5, w7));
+            acc = vaddvq_f64(t0) + vaddvq_f64(t1);
+        }
 #else
         {
             double a[16] = {0};
@@ -1165,6 +1216,27 @@ void k3_matmul_q8(float *y, const float *x, const void *W, int in, int out)
             lo = _mm_add_ss(lo, _mm_shuffle_ps(lo, lo, 1));
             acc = _mm_cvtss_f32(lo);
         }
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+        {
+            /* Draft-only kernel, no determinism contract: fused float accumulation
+             * and the natural NEON reduction, same as the AVX2 form's spirit. */
+            float32x4_t v0 = vdupq_n_f32(0.0f), v1 = vdupq_n_f32(0.0f);
+            float32x4_t v2 = vdupq_n_f32(0.0f), v3 = vdupq_n_f32(0.0f);
+            for (; i + 15 < in; i += 16) {
+                const int8x16_t b = vld1q_s8(w + i);
+                const int16x8_t s0 = vmovl_s8(vget_low_s8(b));
+                const int16x8_t s1 = vmovl_s8(vget_high_s8(b));
+                v0 = vfmaq_f32(v0, vcvtq_f32_s32(vmovl_s16(vget_low_s16(s0))),
+                               vld1q_f32(x + i));
+                v1 = vfmaq_f32(v1, vcvtq_f32_s32(vmovl_s16(vget_high_s16(s0))),
+                               vld1q_f32(x + i + 4));
+                v2 = vfmaq_f32(v2, vcvtq_f32_s32(vmovl_s16(vget_low_s16(s1))),
+                               vld1q_f32(x + i + 8));
+                v3 = vfmaq_f32(v3, vcvtq_f32_s32(vmovl_s16(vget_high_s16(s1))),
+                               vld1q_f32(x + i + 12));
+            }
+            acc = vaddvq_f32(vaddq_f32(vaddq_f32(v0, v1), vaddq_f32(v2, v3)));
+        }
 #else
         {
             float a0 = 0, a1 = 0, a2 = 0, a3 = 0;
@@ -1196,6 +1268,23 @@ static void k3_pair_init(void)
     }
     k3_pair_ready = 1;
 }
+
+#if defined(__ARM_NEON) && defined(__aarch64__)
+/* Every E2M1 value's f32 bit pattern has zero low 16 bits, so a 4-bit code expands to
+ * (B3[code] << 24) | (B2[code] << 16). Two 16-entry byte tables therefore cover the
+ * whole lookup, and vqtbl1q_u8 resolves 16 codes per instruction -- this is what lets
+ * the NEON path expand a group in registers instead of through the wf[] buffer. The
+ * expanded bit patterns are identical to K3_E2M1_PAIR's floats, so using them changes
+ * no arithmetic. */
+static const uint8_t K3_E2M1_B2[16] = {
+    0x00, 0x00, 0x80, 0xC0, 0x00, 0x40, 0x80, 0xC0,
+    0x00, 0x00, 0x80, 0xC0, 0x00, 0x40, 0x80, 0xC0
+};
+static const uint8_t K3_E2M1_B3[16] = {
+    0x00, 0x3F, 0x3F, 0x3F, 0x40, 0x40, 0x40, 0x40,
+    0x80, 0xBF, 0xBF, 0xBF, 0xC0, 0xC0, 0xC0, 0xC0
+};
+#endif
 
 /* E8M0 byte to its power of two. 255 is NaN by spec and maps to zero. Precomputed
  * because ldexpf in the group loop is a function call the compiler will not inline
@@ -1267,6 +1356,64 @@ void k3_matmul_mxfp4(float *y, const float *x, const unsigned char *packed,
             int n = in - g * group;
             if (n > group) n = group;
 
+            double sub;
+#if defined(__ARM_NEON) && defined(__aarch64__)
+            if (n == 32) {
+                /* Full-group fast path: expand all 32 nibbles in registers and feed
+                 * the dot product directly, no wf[] round-trip. vzip1/vzip2 on the
+                 * (low nibble, high nibble) pair restores element order -- low nibble
+                 * is the EVEN element -- then vqtbl1q_u8 resolves 16 codes at a time
+                 * against the two byte tables and vzip+vshll assembles the f32 bit
+                 * patterns. The values, the element order, and the u0..u3 accumulator
+                 * partition are exactly the wf path's, so this stays bit-identical. */
+                const uint8x16_t pkv = vld1q_u8(pb);
+                const uint8x16_t nlo = vandq_u8(pkv, vdupq_n_u8(0x0F));
+                const uint8x16_t nhi = vshrq_n_u8(pkv, 4);
+                const uint8x16_t t2  = vld1q_u8(K3_E2M1_B2);
+                const uint8x16_t t3  = vld1q_u8(K3_E2M1_B3);
+                float64x2_t u0 = vdupq_n_f64(0.0), u1 = vdupq_n_f64(0.0);
+                float64x2_t u2 = vdupq_n_f64(0.0), u3 = vdupq_n_f64(0.0);
+                for (int k = 0; k < 2; k++) {
+                    const uint8x16_t c = k ? vzip2q_u8(nlo, nhi)  /* codes 16..31 */
+                                           : vzip1q_u8(nlo, nhi); /* codes  0..15 */
+                    const uint8x16_t b2 = vqtbl1q_u8(t2, c);
+                    const uint8x16_t b3 = vqtbl1q_u8(t3, c);
+                    /* byte pairs (b2,b3) as u16 = b3<<8 | b2; shift 16 more for f32 */
+                    const uint16x8_t h0 = vreinterpretq_u16_u8(vzip1q_u8(b2, b3));
+                    const uint16x8_t h1 = vreinterpretq_u16_u8(vzip2q_u8(b2, b3));
+                    const float32x4_t w0v =
+                        vreinterpretq_f32_u32(vshll_n_u16(vget_low_u16(h0), 16));
+                    const float32x4_t w1v =
+                        vreinterpretq_f32_u32(vshll_n_u16(vget_high_u16(h0), 16));
+                    const float32x4_t w2v =
+                        vreinterpretq_f32_u32(vshll_n_u16(vget_low_u16(h1), 16));
+                    const float32x4_t w3v =
+                        vreinterpretq_f32_u32(vshll_n_u16(vget_high_u16(h1), 16));
+                    const float32x4_t x0v = vld1q_f32(xg + 16 * k);
+                    const float32x4_t x1v = vld1q_f32(xg + 16 * k + 4);
+                    const float32x4_t x2v = vld1q_f32(xg + 16 * k + 8);
+                    const float32x4_t x3v = vld1q_f32(xg + 16 * k + 12);
+                    u0 = vfmaq_f64(u0, vcvt_f64_f32(vget_low_f32(w0v)),
+                                       vcvt_f64_f32(vget_low_f32(x0v)));
+                    u1 = vfmaq_f64(u1, vcvt_high_f64_f32(w0v), vcvt_high_f64_f32(x0v));
+                    u2 = vfmaq_f64(u2, vcvt_f64_f32(vget_low_f32(w1v)),
+                                       vcvt_f64_f32(vget_low_f32(x1v)));
+                    u3 = vfmaq_f64(u3, vcvt_high_f64_f32(w1v), vcvt_high_f64_f32(x1v));
+                    u0 = vfmaq_f64(u0, vcvt_f64_f32(vget_low_f32(w2v)),
+                                       vcvt_f64_f32(vget_low_f32(x2v)));
+                    u1 = vfmaq_f64(u1, vcvt_high_f64_f32(w2v), vcvt_high_f64_f32(x2v));
+                    u2 = vfmaq_f64(u2, vcvt_f64_f32(vget_low_f32(w3v)),
+                                       vcvt_f64_f32(vget_low_f32(x3v)));
+                    u3 = vfmaq_f64(u3, vcvt_high_f64_f32(w3v), vcvt_high_f64_f32(x3v));
+                }
+                const float64x2_t t0 = vaddq_f64(u0, u2);
+                const float64x2_t t1 = vaddq_f64(u1, u3);
+                sub = vaddvq_f64(t0) + vaddvq_f64(t1);
+                acc += sub * (double)K3_E8M0[sb];
+                continue;
+            }
+#endif
+
             /* Expand the group to floats first, then take a plain dot product. The
              * split exists so the second loop can vectorise, which it cannot do while
              * a table lookup sits in the middle of the accumulation. */
@@ -1295,7 +1442,6 @@ void k3_matmul_mxfp4(float *y, const float *x, const unsigned char *packed,
              * operation, so both paths stay bit-identical. Same reasoning as the
              * fp32/bf16 kernels above; the group is short, so two accumulators
              * suffice to break the add-latency chain. */
-            double sub;
             int i = 0;
 #if defined(__AVX2__)
             {
@@ -1309,6 +1455,30 @@ void k3_matmul_mxfp4(float *y, const float *x, const unsigned char *packed,
                 double a[4];
                 _mm256_storeu_pd(a, _mm256_add_pd(v0, v1));
                 sub = (a[0] + a[1]) + (a[2] + a[3]);
+            }
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+            {
+                /* uk holds the scalar path's {s[2k], s[2k+1]}: element i in
+                 * accumulator i%8, vfmaq_f64 the same IEEE fma() per lane. u0+u2 is
+                 * lanewise {s0+s4, s1+s5} = {b0,b1} and u1+u3 is {b2,b3}, so the
+                 * reduction below is the scalar (b0+b1)+(b2+b3) tree exactly. */
+                float64x2_t u0 = vdupq_n_f64(0.0), u1 = vdupq_n_f64(0.0);
+                float64x2_t u2 = vdupq_n_f64(0.0), u3 = vdupq_n_f64(0.0);
+                for (; i + 7 < n; i += 8) {
+                    const float32x4_t wv0 = vld1q_f32(wf + i);
+                    const float32x4_t wv1 = vld1q_f32(wf + i + 4);
+                    const float32x4_t xv0 = vld1q_f32(xg + i);
+                    const float32x4_t xv1 = vld1q_f32(xg + i + 4);
+                    u0 = vfmaq_f64(u0, vcvt_f64_f32(vget_low_f32(wv0)),
+                                       vcvt_f64_f32(vget_low_f32(xv0)));
+                    u1 = vfmaq_f64(u1, vcvt_high_f64_f32(wv0), vcvt_high_f64_f32(xv0));
+                    u2 = vfmaq_f64(u2, vcvt_f64_f32(vget_low_f32(wv1)),
+                                       vcvt_f64_f32(vget_low_f32(xv1)));
+                    u3 = vfmaq_f64(u3, vcvt_high_f64_f32(wv1), vcvt_high_f64_f32(xv1));
+                }
+                const float64x2_t t0 = vaddq_f64(u0, u2);
+                const float64x2_t t1 = vaddq_f64(u1, u3);
+                sub = vaddvq_f64(t0) + vaddvq_f64(t1);
             }
 #else
             {

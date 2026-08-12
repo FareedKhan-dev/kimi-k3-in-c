@@ -67,8 +67,10 @@ int main(void)
     printf("kernel benchmark at REAL Kimi K3 dimensions\n");
 #ifdef __AVX2__
     printf("built WITH AVX2\n\n");
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+    printf("built WITH NEON\n\n");
 #else
-    printf("built WITHOUT AVX2 (scalar)\n\n");
+    printf("built WITHOUT AVX2 or NEON (scalar)\n\n");
 #endif
 
     /* ---------- bf16 trunk matmul: KDA q_proj, 7168 -> 12288 ---------- */
