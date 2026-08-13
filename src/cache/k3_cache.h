@@ -49,23 +49,43 @@
  *       multiplied cannot be overwritten underneath the kernel;
  *     - a slot whose read has not landed is never handed out.
  *
- * SPECULATIVE PREFETCH: THE PREVIOUS TOKEN'S ROUTING
- *   About 90% of expert requests in a real trace are repeats. When decode arrives at
- *   layer L for token t, layer L's top-16 for token t-1 is already known -- and it is a
- *   good guess, because that is what "90% repeats" means. So the moment the layer is
- *   entered, before the router has even run on the current hidden state, reads are
- *   issued for the PREVIOUS token's set on a background thread. By the time routing has
- *   actually happened, most of what it asks for is either resident or in flight.
+ * SPECULATIVE PREFETCH: MEASURED, AND OFF BY DEFAULT
+ *   The idea: when decode reaches layer L for token t, layer L's top-16 for token t-1 is
+ *   already known, so the reads can be started before the router has even run. It is
+ *   implemented, it is byte-exact, and K3_SPEC=1 turns it on. It is off because it was
+ *   measured and it loses.
  *
- *   A wrong guess costs bandwidth this engine is not otherwise using: it spends 40-77%
- *   of a token waiting on the disk. A right guess converts a blocking 17.55 MB read into
- *   a warm hit. And the two policies compose: a speculative expert that is never
- *   requested lands in the small FIFO and is evicted from there, which is exactly where
- *   a wrong guess belongs.
+ *   MEASURED ON THE RELEASED CHECKPOINT, 10 tokens, quantised trunk fully resident so
+ *   that expert I/O was the whole cost:
  *
- *   K3_NOSPEC=1 disables it. It is also refused automatically when the cache is too
- *   small to hold two tokens' worth of working set, because at that size speculation
- *   would evict what the current token still needs.
+ *     speculation : 1472 experts read on the previous token's routing,
+ *                   446 of the guessed set were then requested (30.3%)
+ *     per token   : 43.8 GB read, against a theoretical maximum of 25.8 GB
+ *                   (1,472 experts x 17.55 MB) if nothing were cached at all
+ *     I/O share   : 96.9% of wall clock
+ *
+ *   So it read a full token's worth of experts to avoid re-reading 30% of them, and the
+ *   other 70% -- 18 GB per token -- was waste on a run with no spare bandwidth at all.
+ *
+ *   THE PREMISE WAS WRONG, and it is worth recording exactly how. It rested on "90% of
+ *   expert requests in a real trace are repeats", which is true of the trace in
+ *   tests/fixtures and means something else: that trace was recorded during FULL
+ *   RECOMPUTE decode, where every step reprocesses the whole prefix, so the repeats are
+ *   within one forward pass across positions. tools/sim_cache.py prints that caveat
+ *   itself. Consecutive-token overlap at the same layer is a different quantity, nobody
+ *   had measured it, and it is 30%.
+ *
+ *   THE SECOND HALF IS STRUCTURAL, and would sink it even at 90%. Speculation only READS
+ *   something when the cache failed to retain it; if the cache retained it, the expert is
+ *   resident and the guess costs and buys nothing. So it does work exactly when the extra
+ *   bytes hurt most. And a correct guess does not AVOID a read -- that expert was going
+ *   to be fetched anyway -- it only starts it earlier, buying latency hiding worth a
+ *   fraction of a layer's compute while spending real bandwidth on the wrong guesses.
+ *
+ *   It is kept rather than deleted because the trade reverses on a machine with spare
+ *   read bandwidth, where hiding latency is free. This engine is not that machine: it
+ *   spends 40-97% of every token waiting on a disk, which is the whole reason the rest of
+ *   this file exists.
  *
  * THE HISTOGRAM IS NOT INSTRUMENTATION
  *   Which experts are hot is not knowable in advance and is the input to any sensible

@@ -199,7 +199,7 @@ int main(int argc, char **argv)
     const char *pol[2] = { "s3fifo", "lru" };
     for (int i = 0; i < 2; i++) {
         setenv("K3_CACHE_POLICY", pol[i], 1);
-        setenv("K3_NOSPEC", "1", 1);          /* speculation gets its own section below */
+        unsetenv("K3_SPEC");                  /* speculation gets its own section below */
         K3Cache cache;
         if (k3_cache_init(&cache, &st, &c, fit) != 0) {
             ck(0, "cache init", pol[i]);
@@ -212,7 +212,6 @@ int main(int argc, char **argv)
         k3_cache_free(&cache);
     }
     unsetenv("K3_CACHE_POLICY");
-    unsetenv("K3_NOSPEC");
 
     /* ---- speculation, which is the only concurrent thing in this file ----
      * A background thread reads the PREVIOUS token's routing while the caller is still
@@ -225,6 +224,11 @@ int main(int argc, char **argv)
      * It needs a cache big enough for the cache to accept speculation at all: two
      * tokens' working set. The doubled budget is what buys that. */
     {
+        /* Opt in: speculation is OFF by default because it was measured on the released
+         * checkpoint and lost -- it read a full token's experts to avoid 30% of them on
+         * a run that was 96.9% I/O bound. The mechanism is still correct and still has
+         * to stay correct, which is what this section checks. */
+        setenv("K3_SPEC", "1", 1);
         K3Cache cache;
         if (k3_cache_init(&cache, &st, &c, fit * 2) != 0) {
             ck(0, "speculating cache init", "");
@@ -282,6 +286,7 @@ int main(int argc, char **argv)
             ck(cache.spec_used > 0, "speculation predicts the next set", NULL);
             k3_cache_free(&cache);
         }
+        unsetenv("K3_SPEC");
     }
 
     k3_st_close(&st);

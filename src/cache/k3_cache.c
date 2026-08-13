@@ -725,8 +725,10 @@ int k3_cache_init(K3Cache *c, const K3St *st, const K3Cfg *cfg, int64_t budget_b
      * on top of what the current layer is using. Below that it would evict what this
      * token still needs, turning a guess into a self-inflicted miss. */
     const int spec_min = 2 * cfg->topk + 8;
-    if (getenv("K3_NOSPEC")) {
-        printf("expert cache: speculative prefetch DISABLED by K3_NOSPEC\n");
+    if (!getenv("K3_SPEC")) {
+        /* OFF by default. See the note in k3_cache.h: measured on the released
+         * checkpoint it read 25.8 GB per token to avoid 30% of it, on a run that was
+         * 96.9% I/O bound. */
     } else if (c->nslot < spec_min) {
         printf("expert cache: speculative prefetch OFF, %d slots is below the %d needed "
                "to hold\n              two tokens' working set at top-%d\n",
