@@ -28,7 +28,7 @@ static int k3_alloc_direct(void **out, size_t bytes);   /* defined below */
  * With one slot in flight the old design could stay informal: the worker held one
  * request, the main thread waited for exactly that request, and the round-robin could
  * not collide with the slot the caller was computing on because there were only ever two.
- * A ring of three or more, kept full, breaks both of those by construction, so the rules
+ * A ring of three or more, kept full, breaks all of these by construction, so the rules
  * are now explicit and enforced in one place, claim_slot_locked:
  *
  *   1. A slot being READ INTO is never handed out again. pending[s] names the layer
@@ -40,6 +40,9 @@ static int k3_alloc_direct(void **out, size_t bytes);   /* defined below */
  *      weights the main thread is multiplying: the read succeeds, no pointer changes,
  *      and the run finishes with fluent wrong tokens. That exact failure was measured on
  *      the released checkpoint when a single-slot ring was given a reader thread.
+ *   3. A slot holding a layer the walk is ABOUT TO REACH is never evicted either. See
+ *      upcoming(). This one costs bytes rather than correctness, which is why it went
+ *      unnoticed: the layer is simply read a second time.
  *
  * Everything that touches layer_of, slot_of, ring, pending or the request queue holds
  * io->mu. The READS themselves happen outside it, which is the entire point: the worker
@@ -562,6 +565,29 @@ static void tally_locked(K3Trunk *tr, double secs, int64_t bytes)
     tr->bytes_read += (uint64_t)bytes;
 }
 
+/* Is this slot holding a layer the walk is ABOUT to need?
+ *
+ * The third protection, after "being read into" and "in use by the caller". A layer the
+ * prefetcher already fetched and published, but that the walk has not reached yet, is
+ * neither of those -- so a claim for a further-ahead layer would evict it, and the walk
+ * would arrive a moment later and read it AGAIN. That is invisible in the token stream
+ * and shows up only as bytes: measured on the synthetic trunk at ring depth 2, 6.23 MB
+ * read against a 4.72 MB bound, and on the released checkpoint as 491 GB read from a
+ * 29.81 GB trunk over ten passes.
+ *
+ * It bites hardest immediately after a PINNED layer, because those hold no ring slot, so
+ * `held` is -1 and every slot looks claimable.
+ *
+ * The window is bounded by the ring itself: a layer more than nslot ahead cannot have
+ * been prefetched by this pass, so a slot holding one is stale from the PREVIOUS pass --
+ * layers 91 and 92 still sitting there when the walk has wrapped to layer 0 -- and must
+ * stay evictable, or a two-slot ring would deadlock at the start of every pass. */
+static int upcoming(const K3Trunk *tr, int s)
+{
+    const int L = tr->layer_of[s];
+    return L > tr->walk && L <= tr->walk + tr->nslot;
+}
+
 /* Take a ring slot for layer L, evicting whatever it held. Caller holds io->mu.
  * Returns -1 when every slot is either being read into or in use by the caller, which
  * is a normal transient rather than an error: wait on cv_done and retry. */
@@ -571,6 +597,7 @@ static int claim_slot_locked(K3Trunk *tr, K3TrunkIO *io, int L)
         const int s = (tr->ring + i) % tr->nslot;
         if (io->pending[s] >= 0) continue;      /* a read is landing in it  */
         if (s == io->held) continue;            /* the caller is reading it */
+        if (upcoming(tr, s)) continue;          /* the walk needs it next   */
         tr->ring = (s + 1) % tr->nslot;
         if (tr->layer_of[s] >= 0) tr->slot_of[tr->layer_of[s]] = -1;
         tr->layer_of[s] = -1;                   /* EMPTY before the read, not after */
@@ -630,6 +657,13 @@ int k3_trunk_fetch(K3Trunk *tr, int L, unsigned char **out)
     if (L < 0 || L >= tr->n_layers) return -1;
     unsigned char *base;
     K3TrunkIO *io = (K3TrunkIO *)tr->io_state;
+
+    /* Where the walk is. Everything at or behind this has been consumed and its slot may
+     * be reused; a short way ahead of it is what the prefetcher has in flight and must
+     * not lose. Updated under the lock because claim_slot_locked reads it. */
+    pthread_mutex_lock(&io->mu);
+    tr->walk = L;
+    pthread_mutex_unlock(&io->mu);
 
     if (tr->pin_of[L] >= 0) {
         base = tr->pin[tr->pin_of[L]];

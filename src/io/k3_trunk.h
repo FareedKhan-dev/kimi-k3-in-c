@@ -120,6 +120,9 @@ typedef struct {
     int         *layer_of;      /* [nslot] which layer occupies each ring slot  */
     int32_t     *slot_of;       /* [n_layers], -1 when not resident             */
     int          ring;          /* next ring slot to reuse                      */
+    int          walk;          /* layer the caller last fetched. Slots holding layers
+                                 * just AHEAD of it are prefetched-but-unconsumed and
+                                 * must not be evicted; see upcoming() in the .c    */
 
     /* One asynchronous reader keeps the spare ring slots busy. The worker never publishes
      * a layer name before its read succeeds; bind waits for completion before consuming
