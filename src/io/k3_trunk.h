@@ -122,7 +122,9 @@ typedef struct {
     int          ring;          /* next ring slot to reuse                      */
     int          walk;          /* layer the caller last fetched. Slots holding layers
                                  * just AHEAD of it are prefetched-but-unconsumed and
-                                 * must not be evicted; see upcoming() in the .c    */
+                                 * must not be evicted. "Just ahead" counts STREAMING
+                                 * layers, not indices, because the prefetcher skips
+                                 * pinned ones; see upcoming() in the .c            */
 
     /* One asynchronous reader keeps the spare ring slots busy. The worker never publishes
      * a layer name before its read succeeds; bind waits for completion before consuming
@@ -135,6 +137,12 @@ typedef struct {
     /* stats */
     uint64_t     hits, misses;
     uint64_t     bytes_read;
+    /* [n_layers] how many times each layer's run actually crossed the device. A pinned
+     * layer should end on 1 and a streaming layer on one per pass; anything above that is
+     * a slot evicted before the walk reached it. Kept because the aggregate byte count
+     * cannot say WHICH layers, and two rounds of inferring that from the pinned set were
+     * both wrong. k3_trunk_report prints the offenders. */
+    uint32_t    *reads_of;
     double       load_seconds;
 } K3Trunk;
 

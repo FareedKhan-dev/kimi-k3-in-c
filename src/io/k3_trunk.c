@@ -224,6 +224,13 @@ int k3_trunk_open(K3Trunk *tr, const char *dir, const K3Cfg *c, int64_t budget_b
     if (!tr->slot_of) return -1;
     for (int i = 0; i < tr->n_layers; i++) tr->slot_of[i] = -1;
 
+    /* One counter per layer, so a re-read has a NAME. The aggregate byte count says the
+     * ring read 13.7% more than the walk needed and says nothing about which layers, and
+     * every attempt to infer that from the pinned set has been a guess. See the note above
+     * k3_trunk_report. */
+    tr->reads_of = (uint32_t *)calloc((size_t)tr->n_layers, sizeof(uint32_t));
+    if (!tr->reads_of) return -1;
+
     /* Ring slots: the layer being computed on, plus the reads in flight behind it.
      *
      * This is a REQUEST, not a guarantee. Each slot costs a full slot's worth of memory,
@@ -480,6 +487,7 @@ void k3_trunk_close(K3Trunk *tr)
     if (tr->fd >= 0) close(tr->fd);
     if (tr->pin) { for (int i = 0; i < tr->npin; i++) k3_aligned_free(tr->pin[i]); free(tr->pin); }
     k3_aligned_free(tr->arena); free(tr->layer_of); free(tr->slot_of); free(tr->pin_of);
+    free(tr->reads_of);
     if (tr->lay) { for (int i = 0; i < tr->n_layers; i++) free(tr->lay[i].t); free(tr->lay); }
     free(tr->json_arena);   /* every K3TrunkTensor.name points into this */
     memset(tr, 0, sizeof *tr);
@@ -558,11 +566,15 @@ static int load_run_to(K3Trunk *tr, int L, unsigned char *dst, K3Uring *ur,
     return 0;
 }
 
-/* Fold one completed read into the shared counters. Caller holds io->mu. */
-static void tally_locked(K3Trunk *tr, double secs, int64_t bytes)
+/* Fold one completed read into the shared counters. Caller holds io->mu.
+ *
+ * L is counted even when the read FAILED: the bytes still crossed the device, and the
+ * per-layer counter exists to explain the byte total rather than the token stream. */
+static void tally_locked(K3Trunk *tr, int L, double secs, int64_t bytes)
 {
     tr->load_seconds += secs;
     tr->bytes_read += (uint64_t)bytes;
+    if (L >= 0 && L < tr->n_layers && tr->reads_of) tr->reads_of[L]++;
 }
 
 /* Is this slot holding a layer the walk is ABOUT to need?
@@ -578,14 +590,35 @@ static void tally_locked(K3Trunk *tr, double secs, int64_t bytes)
  * It bites hardest immediately after a PINNED layer, because those hold no ring slot, so
  * `held` is -1 and every slot looks claimable.
  *
- * The window is bounded by the ring itself: a layer more than nslot ahead cannot have
- * been prefetched by this pass, so a slot holding one is stale from the PREVIOUS pass --
- * layers 91 and 92 still sitting there when the walk has wrapped to layer 0 -- and must
- * stay evictable, or a two-slot ring would deadlock at the start of every pass. */
+ * The window is bounded by the ring itself: a layer the prefetcher could not have reached
+ * on this pass is stale from the PREVIOUS one -- layers 91 and 92 still sitting there when
+ * the walk has wrapped to layer 0 -- and must stay evictable, or a two-slot ring would
+ * deadlock at the start of every pass.
+ *
+ * WHAT "COULD NOT HAVE REACHED" MEANS, and why the obvious form of it is wrong. The first
+ * version measured INDEX distance: layer L is protected when walk < L <= walk + nslot.
+ * That is only right when nothing is pinned. k3_trunk_prefetch SKIPS pinned layers while
+ * scanning rather than stopping at them, so with pinned layers ahead it queues something
+ * many indices out that is only a few SLOTS out -- and the index window then declared it
+ * stale and let the next claim evict it, seconds before the walk arrived.
+ *
+ * So count the layers that would actually TAKE a slot. A ring of nslot slots can hold at
+ * most nslot streaming layers ahead of the walk, whatever their indices, which makes this
+ * exactly the old test whenever nothing is pinned and a strictly wider one otherwise.
+ *
+ * Found by sweeping the shape space rather than by reasoning about it: the two hand-built
+ * fixtures in tests/unit/test_trunk.c both accepted the index form, and a 93-layer sweep
+ * across budgets and ring depths failed 40 of 100 cases against it, worst at 56 pinned
+ * layers with a four-slot ring. Two arguments from mechanism about which shape escaped
+ * were made before that sweep existed, and both were wrong. */
 static int upcoming(const K3Trunk *tr, int s)
 {
     const int L = tr->layer_of[s];
-    return L > tr->walk && L <= tr->walk + tr->nslot;
+    if (L <= tr->walk) return 0;
+    int ahead = 0;
+    for (int n = tr->walk + 1; n < L; n++)
+        if (tr->pin_of[n] < 0 && ++ahead >= tr->nslot) return 0;
+    return 1;
 }
 
 /* Take a ring slot for layer L, evicting whatever it held. Caller holds io->mu.
@@ -632,7 +665,7 @@ static void *trunk_io_main(void *arg)
                                    io->ur, &secs, &bytes);
 
         pthread_mutex_lock(&io->mu);
-        tally_locked(tr, secs, bytes);
+        tally_locked(tr, L, secs, bytes);
         io->pending[slot] = -1;
         if (rc == 0) {
             /* Publish ONLY after the read succeeded. Registering the layer up front
@@ -678,7 +711,7 @@ int k3_trunk_fetch(K3Trunk *tr, int L, unsigned char **out)
              * intermittent stall in tests/unit/test_trunk.c at ring depths 2 and 3. */
             const int rc = load_run_to(tr, L, base, tr->uring, &secs, &bytes);
             pthread_mutex_lock(&io->mu);
-            tally_locked(tr, secs, bytes);
+            tally_locked(tr, L, secs, bytes);
             if (rc == 0) { tr->slot_of[L] = L; tr->misses++; }
             pthread_mutex_unlock(&io->mu);
             if (rc != 0) return -1;
@@ -716,7 +749,7 @@ int k3_trunk_fetch(K3Trunk *tr, int L, unsigned char **out)
                                            tr->arena + (size_t)slot * tr->slot_bytes,
                                            tr->uring, &secs, &bytes);
                 pthread_mutex_lock(&io->mu);
-                tally_locked(tr, secs, bytes);
+                tally_locked(tr, L, secs, bytes);
                 io->pending[slot] = -1;
                 if (rc == 0) { tr->layer_of[slot] = L; tr->slot_of[L] = slot; }
                 pthread_cond_broadcast(&io->cv_done);
@@ -806,6 +839,44 @@ void k3_trunk_report(const K3Trunk *tr, const char *label)
     printf("  read %.2f GB in %.2f s (%.0f MB/s)\n",
            (double)tr->bytes_read / 1e9, tr->load_seconds,
            tr->load_seconds > 0 ? (double)tr->bytes_read / 1e6 / tr->load_seconds : 0.0);
+
+    /* WHAT THE WALK ACTUALLY OWED, and which layers went over it.
+     *
+     * The walk is fixed: every pass touches every layer once, so a pinned layer owes ONE
+     * read for the whole run and a streaming layer owes one per pass. Anything above that
+     * is a slot evicted between the prefetch that filled it and the walk that needed it --
+     * invisible in the token stream, visible only here.
+     *
+     * This is printed because the aggregate was not enough to act on. A measured run came
+     * in 13.7% above this bound and two separate explanations were argued from the pinned
+     * set's shape, both without evidence. A per-layer count settles it by naming them. */
+    if (tr->reads_of && n > 0) {
+        const int passes = (int)((n + (uint64_t)tr->n_layers - 1) / (uint64_t)tr->n_layers);
+        int64_t owed = 0, got = 0, over_layers = 0;
+        for (int L = 0; L < tr->n_layers; L++) {
+            const int want = (tr->pin_of[L] >= 0) ? 1 : passes;
+            owed += (int64_t)want;
+            got  += (int64_t)tr->reads_of[L];
+            if ((int)tr->reads_of[L] > want) over_layers++;
+        }
+        printf("  reads %lld against %lld the walk owes (%d passes, %d pinned)",
+               (long long)got, (long long)owed, passes, tr->npin);
+        if (over_layers == 0) {
+            printf("  -- exact\n");
+        } else {
+            printf("\n  %lld layer(s) read more than the walk needed:", (long long)over_layers);
+            int shown = 0;
+            for (int L = 0; L < tr->n_layers && shown < 12; L++) {
+                const int want = (tr->pin_of[L] >= 0) ? 1 : passes;
+                if ((int)tr->reads_of[L] > want) {
+                    printf(" %d(%ux%s)", L, tr->reads_of[L], tr->pin_of[L] >= 0 ? ",pin" : "");
+                    shown++;
+                }
+            }
+            if (over_layers > shown) printf(" ...");
+            printf("\n");
+        }
+    }
     /* The rate above is a DEVICE rate: load_seconds brackets the pread loop alone. The
      * breakdown below is the wall clock actually spent inside k3_trunk_bind, so the
      * difference between them is per-bind overhead rather than disk time.
