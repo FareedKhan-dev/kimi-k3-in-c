@@ -1255,7 +1255,8 @@ static void k3_e8m0_init(void)
  * dequantise-then-k3_matmul, and no caller should assume it is. On AVX2 with a
  * group that is a multiple of 16 (K3 uses 32) it runs the FLAT ROW PATH below: the
  * E8M0 power-of-two scale is folded into each E2M1 weight exactly, and the whole
- * row is summed by eight independent double accumulators. Otherwise it sums each
+ * row is summed by sixteen independent double accumulator lanes (four __m256d).
+ * Otherwise it sums each
  * group of 32 and applies that group's scale before accumulating. Both orderings
  * differ from dequantise-then-matmul's single accumulator set.
  *
@@ -1421,22 +1422,22 @@ void k3_matmul_mxfp4(float *y, const float *x, const unsigned char *packed,
                 xdg = xlocal;
             }
 
-            /* Four double lanes partitioned by i%4, reduced as (s0+s1)+(s2+s3), in BOTH
-             * the scalar and the AVX2 path so the two agree bit for bit on every
-             * machine. The split is written out rather than left to the compiler
-             * because a sequential floating-point reduction may not be reassociated
-             * without -ffast-math, which this build does not set: expressed as one
-             * serial accumulator, the hottest loop in the engine compiles to scalar
-             * adds no matter what the surrounding code looks like.
+            /* Four double lanes partitioned by i%4, reduced as (s0+s1)+(s2+s3), in
+             * the scalar path, so on machines without AVX2 the reduction is the
+             * same on every compiler. The split is written out rather than left to
+             * the compiler because a sequential floating-point reduction may not be
+             * reassociated without -ffast-math, which this build does not set:
+             * expressed as one serial accumulator, the hottest loop in the engine
+             * compiles to scalar adds no matter what the surrounding code looks
+             * like.
              *
-             * The lane split changes the summation order. See the accuracy contract on
-             * the function above for why that is bounded at ~1e-16 relative. */
-            /* Two fused vector accumulators over the 32-element group, element i to
-             * accumulator (i/4)%2, lanewise-summed then cross-lane paired; the scalar
-             * path is the identical partition with fma(), which is the same IEEE
-             * operation, so both paths stay bit-identical. Same reasoning as the
-             * fp32/bf16 kernels above; the group is short, so two accumulators
-             * suffice to break the add-latency chain. */
+             * The lane split changes the summation order. See the accuracy contract
+             * on the function above for why that is bounded at ~1e-16 relative. */
+            /* The AVX2 grouped path below uses four __m256d accumulators over each
+             * 16-element chunk, so its intra-lane summation order differs from the
+             * scalar path; see the NIBBLE DECODE comment below for the accuracy
+             * contract. The group is short, so four accumulators suffice to break
+             * the add-latency chain. */
             double sub;
             int i = 0;
 #if defined(__AVX2__)
@@ -1477,33 +1478,33 @@ void k3_matmul_mxfp4(float *y, const float *x, const unsigned char *packed,
               * scalar tail handles 8-15 and 0-7 remainders. */
              __m256d v0 = _mm256_setzero_pd(), v1 = _mm256_setzero_pd();
              __m256d v2 = _mm256_setzero_pd(), v3 = _mm256_setzero_pd();
-for (; i + 15 < n; i += 16) {
-                  const __m128i b  = _mm_loadl_epi64((const __m128i *)(pb + (i >> 1)));
-                  const __m128i lo = _mm_and_si128(b, m0f);
-                  const __m128i hi = _mm_and_si128(_mm_srli_epi16(b, 4), m0f);
-                  /* unpacklo interleaves the low 8 bytes of lo and hi, which together
-                   * cover all 16 elements in order: [e0,e1,e2,...,e15]. Split that 16
-                   * bytes into the low 8 (elems 0-7) and high 8 (elems 8-15). */
-                  const __m128i u16 = _mm_unpacklo_epi8(lo, hi);
-                  const __m256i c0 = _mm256_cvtepu8_epi32(u16);
-                  const __m256i c1 = _mm256_cvtepu8_epi32(_mm_srli_si128(u16, 8));
-                  const __m256  w0 = _mm256_xor_ps(
-                      _mm256_permutevar8x32_ps(LUT, _mm256_and_si256(c0, m07)),
-                      _mm256_castsi256_ps(
-                          _mm256_slli_epi32(_mm256_and_si256(c0, m08), 28)));
-                  const __m256  w1 = _mm256_xor_ps(
-                      _mm256_permutevar8x32_ps(LUT, _mm256_and_si256(c1, m07)),
-                      _mm256_castsi256_ps(
-                          _mm256_slli_epi32(_mm256_and_si256(c1, m08), 28)));
-                  v0 = _mm256_fmadd_pd(_mm256_cvtps_pd(_mm256_castps256_ps128(w0)),
-                                       _mm256_loadu_pd(xdg + i), v0);
-                  v1 = _mm256_fmadd_pd(_mm256_cvtps_pd(_mm256_extractf128_ps(w0, 1)),
-                                       _mm256_loadu_pd(xdg + i + 4), v1);
-                  v2 = _mm256_fmadd_pd(_mm256_cvtps_pd(_mm256_castps256_ps128(w1)),
-                                       _mm256_loadu_pd(xdg + i + 8), v2);
-                  v3 = _mm256_fmadd_pd(_mm256_cvtps_pd(_mm256_extractf128_ps(w1, 1)),
-                                       _mm256_loadu_pd(xdg + i + 12), v3);
-              }
+             for (; i + 15 < n; i += 16) {
+                 const __m128i b  = _mm_loadl_epi64((const __m128i *)(pb + (i >> 1)));
+                 const __m128i lo = _mm_and_si128(b, m0f);
+                 const __m128i hi = _mm_and_si128(_mm_srli_epi16(b, 4), m0f);
+                 /* unpacklo interleaves the low 8 bytes of lo and hi, which together
+                  * cover all 16 elements in order: [e0,e1,e2,...,e15]. Split that 16
+                  * bytes into the low 8 (elems 0-7) and high 8 (elems 8-15). */
+                 const __m128i u16 = _mm_unpacklo_epi8(lo, hi);
+                 const __m256i c0 = _mm256_cvtepu8_epi32(u16);
+                 const __m256i c1 = _mm256_cvtepu8_epi32(_mm_srli_si128(u16, 8));
+                 const __m256  w0 = _mm256_xor_ps(
+                     _mm256_permutevar8x32_ps(LUT, _mm256_and_si256(c0, m07)),
+                     _mm256_castsi256_ps(
+                         _mm256_slli_epi32(_mm256_and_si256(c0, m08), 28)));
+                 const __m256  w1 = _mm256_xor_ps(
+                     _mm256_permutevar8x32_ps(LUT, _mm256_and_si256(c1, m07)),
+                     _mm256_castsi256_ps(
+                         _mm256_slli_epi32(_mm256_and_si256(c1, m08), 28)));
+                 v0 = _mm256_fmadd_pd(_mm256_cvtps_pd(_mm256_castps256_ps128(w0)),
+                                      _mm256_loadu_pd(xdg + i), v0);
+                 v1 = _mm256_fmadd_pd(_mm256_cvtps_pd(_mm256_extractf128_ps(w0, 1)),
+                                      _mm256_loadu_pd(xdg + i + 4), v1);
+                 v2 = _mm256_fmadd_pd(_mm256_cvtps_pd(_mm256_castps256_ps128(w1)),
+                                      _mm256_loadu_pd(xdg + i + 8), v2);
+                 v3 = _mm256_fmadd_pd(_mm256_cvtps_pd(_mm256_extractf128_ps(w1, 1)),
+                                      _mm256_loadu_pd(xdg + i + 12), v3);
+             }
              /* 8-element remainder: same AVX2 decode + FMA as before. Runs at most
               * once, for the 8-15 remainder after the 16-element loop. */
              for (; i + 7 < n; i += 8) {
