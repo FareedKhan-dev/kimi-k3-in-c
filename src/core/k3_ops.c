@@ -1470,59 +1470,59 @@ void k3_matmul_mxfp4(float *y, const float *x, const unsigned char *packed,
                 const __m128i m0f = _mm_set1_epi8(0x0F);
                 const __m256i m07 = _mm256_set1_epi32(7);
                 const __m256i m08 = _mm256_set1_epi32(8);
-             /* 16-element iteration: ONE 8-byte load yields all 16 nibbles, decoded
-              * into c0/c1 by unpacking the low/high nibble masks. Each block feeds its
-              * own accumulator (v0..v3), so per iteration every accumulator chain is a
-              * single FMA -- four independent depth-1 chains hide both the decode
-              * latency and the FMA latency. Group 32 collapses to two iterations. The
-              * scalar tail handles 8-15 and 0-7 remainders. */
-             __m256d v0 = _mm256_setzero_pd(), v1 = _mm256_setzero_pd();
-             __m256d v2 = _mm256_setzero_pd(), v3 = _mm256_setzero_pd();
-             for (; i + 15 < n; i += 16) {
-                 const __m128i b  = _mm_loadl_epi64((const __m128i *)(pb + (i >> 1)));
-                 const __m128i lo = _mm_and_si128(b, m0f);
-                 const __m128i hi = _mm_and_si128(_mm_srli_epi16(b, 4), m0f);
-                 /* unpacklo interleaves the low 8 bytes of lo and hi, which together
-                  * cover all 16 elements in order: [e0,e1,e2,...,e15]. Split that 16
-                  * bytes into the low 8 (elems 0-7) and high 8 (elems 8-15). */
-                 const __m128i u16 = _mm_unpacklo_epi8(lo, hi);
-                 const __m256i c0 = _mm256_cvtepu8_epi32(u16);
-                 const __m256i c1 = _mm256_cvtepu8_epi32(_mm_srli_si128(u16, 8));
-                 const __m256  w0 = _mm256_xor_ps(
-                     _mm256_permutevar8x32_ps(LUT, _mm256_and_si256(c0, m07)),
-                     _mm256_castsi256_ps(
-                         _mm256_slli_epi32(_mm256_and_si256(c0, m08), 28)));
-                 const __m256  w1 = _mm256_xor_ps(
-                     _mm256_permutevar8x32_ps(LUT, _mm256_and_si256(c1, m07)),
-                     _mm256_castsi256_ps(
-                         _mm256_slli_epi32(_mm256_and_si256(c1, m08), 28)));
-                 v0 = _mm256_fmadd_pd(_mm256_cvtps_pd(_mm256_castps256_ps128(w0)),
-                                      _mm256_loadu_pd(xdg + i), v0);
-                 v1 = _mm256_fmadd_pd(_mm256_cvtps_pd(_mm256_extractf128_ps(w0, 1)),
-                                      _mm256_loadu_pd(xdg + i + 4), v1);
-                 v2 = _mm256_fmadd_pd(_mm256_cvtps_pd(_mm256_castps256_ps128(w1)),
-                                      _mm256_loadu_pd(xdg + i + 8), v2);
-                 v3 = _mm256_fmadd_pd(_mm256_cvtps_pd(_mm256_extractf128_ps(w1, 1)),
-                                      _mm256_loadu_pd(xdg + i + 12), v3);
-             }
-             /* 8-element remainder: same AVX2 decode + FMA as before. Runs at most
-              * once, for the 8-15 remainder after the 16-element loop. */
-             for (; i + 7 < n; i += 8) {
-                 int32_t four;
-                 memcpy(&four, pb + (i >> 1), 4);
-                 const __m128i b  = _mm_cvtsi32_si128(four);
-                 const __m128i lo = _mm_and_si128(b, m0f);
-                 const __m128i hi = _mm_and_si128(_mm_srli_epi16(b, 4), m0f);
-                 const __m256i c  = _mm256_cvtepu8_epi32(_mm_unpacklo_epi8(lo, hi));
-                 const __m256  wv = _mm256_xor_ps(
-                     _mm256_permutevar8x32_ps(LUT, _mm256_and_si256(c, m07)),
-                     _mm256_castsi256_ps(
-                         _mm256_slli_epi32(_mm256_and_si256(c, m08), 28)));
-                 v0 = _mm256_fmadd_pd(_mm256_cvtps_pd(_mm256_castps256_ps128(wv)),
-                                      _mm256_loadu_pd(xdg + i), v0);
-                 v1 = _mm256_fmadd_pd(_mm256_cvtps_pd(_mm256_extractf128_ps(wv, 1)),
-                                      _mm256_loadu_pd(xdg + i + 4), v1);
-             }
+                /* 16-element iteration: ONE 8-byte load yields all 16 nibbles, decoded
+                 * into c0/c1 by unpacking the low/high nibble masks. Each block feeds its
+                 * own accumulator (v0..v3), so per iteration every accumulator chain is a
+                 * single FMA -- four independent depth-1 chains hide both the decode
+                 * latency and the FMA latency. Group 32 collapses to two iterations. The
+                 * scalar tail handles 8-15 and 0-7 remainders. */
+                __m256d v0 = _mm256_setzero_pd(), v1 = _mm256_setzero_pd();
+                __m256d v2 = _mm256_setzero_pd(), v3 = _mm256_setzero_pd();
+                for (; i + 15 < n; i += 16) {
+                    const __m128i b  = _mm_loadl_epi64((const __m128i *)(pb + (i >> 1)));
+                    const __m128i lo = _mm_and_si128(b, m0f);
+                    const __m128i hi = _mm_and_si128(_mm_srli_epi16(b, 4), m0f);
+                    /* unpacklo interleaves the low 8 bytes of lo and hi, which together
+                     * cover all 16 elements in order: [e0,e1,e2,...,e15]. Split that 16
+                     * bytes into the low 8 (elems 0-7) and high 8 (elems 8-15). */
+                    const __m128i u16 = _mm_unpacklo_epi8(lo, hi);
+                    const __m256i c0 = _mm256_cvtepu8_epi32(u16);
+                    const __m256i c1 = _mm256_cvtepu8_epi32(_mm_srli_si128(u16, 8));
+                    const __m256  w0 = _mm256_xor_ps(
+                        _mm256_permutevar8x32_ps(LUT, _mm256_and_si256(c0, m07)),
+                        _mm256_castsi256_ps(
+                            _mm256_slli_epi32(_mm256_and_si256(c0, m08), 28)));
+                    const __m256  w1 = _mm256_xor_ps(
+                        _mm256_permutevar8x32_ps(LUT, _mm256_and_si256(c1, m07)),
+                        _mm256_castsi256_ps(
+                            _mm256_slli_epi32(_mm256_and_si256(c1, m08), 28)));
+                    v0 = _mm256_fmadd_pd(_mm256_cvtps_pd(_mm256_castps256_ps128(w0)),
+                                         _mm256_loadu_pd(xdg + i), v0);
+                    v1 = _mm256_fmadd_pd(_mm256_cvtps_pd(_mm256_extractf128_ps(w0, 1)),
+                                         _mm256_loadu_pd(xdg + i + 4), v1);
+                    v2 = _mm256_fmadd_pd(_mm256_cvtps_pd(_mm256_castps256_ps128(w1)),
+                                         _mm256_loadu_pd(xdg + i + 8), v2);
+                    v3 = _mm256_fmadd_pd(_mm256_cvtps_pd(_mm256_extractf128_ps(w1, 1)),
+                                         _mm256_loadu_pd(xdg + i + 12), v3);
+                }
+                /* 8-element remainder: same AVX2 decode + FMA as before. Runs at most
+                 * once, for the 8-15 remainder after the 16-element loop. */
+                for (; i + 7 < n; i += 8) {
+                    int32_t four;
+                    memcpy(&four, pb + (i >> 1), 4);
+                    const __m128i b  = _mm_cvtsi32_si128(four);
+                    const __m128i lo = _mm_and_si128(b, m0f);
+                    const __m128i hi = _mm_and_si128(_mm_srli_epi16(b, 4), m0f);
+                    const __m256i c  = _mm256_cvtepu8_epi32(_mm_unpacklo_epi8(lo, hi));
+                    const __m256  wv = _mm256_xor_ps(
+                        _mm256_permutevar8x32_ps(LUT, _mm256_and_si256(c, m07)),
+                        _mm256_castsi256_ps(
+                            _mm256_slli_epi32(_mm256_and_si256(c, m08), 28)));
+                    v0 = _mm256_fmadd_pd(_mm256_cvtps_pd(_mm256_castps256_ps128(wv)),
+                                         _mm256_loadu_pd(xdg + i), v0);
+                    v1 = _mm256_fmadd_pd(_mm256_cvtps_pd(_mm256_extractf128_ps(wv, 1)),
+                                         _mm256_loadu_pd(xdg + i + 4), v1);
+                }
                 double a[4];
                 _mm256_storeu_pd(a, _mm256_add_pd(_mm256_add_pd(v0, v2),
                                                   _mm256_add_pd(v1, v3)));
