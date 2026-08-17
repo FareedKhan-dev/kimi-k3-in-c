@@ -24,6 +24,22 @@
 </tr>
 </table>
 
+</div>
+
+## Getting Started
+
+```bash
+git clone https://github.com/FareedKhan-dev/kimi-k3-in-c.git && cd kimi-k3-in-c
+brew install go-task    # or: sh -c "$(curl -fsSL https://taskfile.dev/install.sh)" -- -d -b ~/.local/bin
+task build && task test
+```
+
+That's it: no checkpoint, no network, no Python needed for this. It builds the engine and
+runs the full weightless test suite (about a minute) against fixtures committed to the
+repo. See [Full setup](#full-setup) below for running the actual 2.78T model.
+
+<div align="center">
+
 <p><b>The same 2.78-trillion-parameter model, the same answer, on whatever machine you own.</b><br>More memory only buys speed:</p>
 
 <table>
@@ -128,6 +144,7 @@ component at a time.
 
 **[Part I: Getting started](#part-i-getting-started)**
 
+- [Getting Started](#getting-started): the two-command version, right up top
 - [Requirements](#requirements)
 - [Quick start](#quick-start): clone, build and verify in about a minute, with no model
 - [Full setup](#full-setup): the whole path to generated text
@@ -212,28 +229,9 @@ you can still do everything in [Quick start](#quick-start).
 
 ## Quick start
 
-The build is driven by [Task](https://taskfile.dev), a small single-binary command
-runner (not GNU Make: one YAML file instead of Make's dialect, and no OS-specific
-`ifeq`/`ifdef` branching to keep macOS and Linux in sync). Install it once:
-
-```bash
-brew install go-task              # macOS, or Linux with Homebrew
-# or: sh -c "$(curl -fsSL https://taskfile.dev/install.sh)" -- -d -b ~/.local/bin
-task --version
-```
-
-Then clone, build and run the entire test suite. **No checkpoint, no network, no
-Python**. The whole thing takes about a minute.
-
-```bash
-git clone https://github.com/FareedKhan-dev/kimi-k3-in-c.git
-cd kimi-k3-in-c
-
-task build          # seconds. Seven C files, a compiler and OpenMP
-task test           # under a minute
-```
-
-`task --list` shows every task with a one-line description.
+[Getting Started](#getting-started) above covers the commands. This is what they're
+doing: `task build` is seconds (seven C files, a compiler and OpenMP), `task test` is
+under a minute, and `task --list` shows every task with a one-line description.
 
 It ends like this, or it failed:
 
