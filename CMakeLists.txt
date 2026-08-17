@@ -1,7 +1,8 @@
 # Kimi K3 inference engine.
 #
-# The Makefile is the reference build and what CI uses. This exists for IDE integration
-# and for platforms where GNU make is awkward. Both produce the same binary.
+# Taskfile.yml (`task build`) is the reference build and what CI uses. This exists for
+# IDE integration and for platforms where a YAML-driven build is awkward. Both produce
+# the same binary.
 #
 #   cmake -B build -DCMAKE_BUILD_TYPE=Release
 #   cmake --build build -j

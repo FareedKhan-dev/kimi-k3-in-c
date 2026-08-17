@@ -1,11 +1,11 @@
 # Testing
 
-Every test in `make test` runs **without model weights**. The checkpoint is 1.56 TB; if
+Every test in `task test` runs **without model weights**. The checkpoint is 1.56 TB; if
 correctness depended on having it, correctness would not get checked.
 
 ```bash
-make test          # everything below; about 15 s, peak RSS ~1.7 GB
-make test-all SHARD_DIR=~/k3model   # adds the checkpoint-dependent tests
+task test          # everything below; about 15 s, peak RSS ~1.7 GB
+task test-all SHARD_DIR=~/k3model   # adds the checkpoint-dependent tests
 ```
 
 ## What each gate proves
@@ -35,14 +35,14 @@ loads, runs, and is architecturally wrong, with nothing to indicate it.
 scratch-sizing helper returns a sane value at full width rather than only at fixture
 width, and it allocates and runs one complete 7168-wide KDA layer. That last step is a
 single **1.77 GB** allocation, which is the only real resource requirement anywhere in
-`make test`; on a machine too small for it the test says so and fails rather than
+`task test`; on a machine too small for it the test says so and fails rather than
 skipping.
 
 **`test_tok`**, byte-exact roundtrip (encode then decode recovers the input exactly).
 With `tools/tok_parity.py` it also compares token-for-token against the reference
 tokenizer across CJK, emoji, ZWJ sequences, accents, contractions and whitespace runs.
 This is the one gate that cannot run on a clean checkout: `tiktoken.model` has 163,584
-entries and ships with the checkpoint, not with this repository. `make test` reports it as
+entries and ships with the checkpoint, not with this repository. `task test` reports it as
 **NOT RUN** rather than passing it quietly.
 
 You do not need the 1.56 TB checkpoint to run it. Four small files are enough, about
@@ -53,14 +53,14 @@ hf download moonshotai/Kimi-K3 \
     tiktoken.model tokenizer_config.json config.json tokenization_kimi.py \
     --local-dir ~/k3tok
 
-make test TOK_FILES=~/k3tok                 # the roundtrip leg now runs
-make tok  TOK_FILES=~/k3tok                 # token-for-token parity, needs `pip install tiktoken`
+task test TOK_FILES=~/k3tok                 # the roundtrip leg now runs
+task tok  TOK_FILES=~/k3tok                 # token-for-token parity, needs `pip install tiktoken`
 ./bin/test_cfg real ~/k3tok/config.json     # the released nested config
 ```
 
 `tokenization_kimi.py` is required by `tools/tok_parity.py`, which reads the split regex
 out of it rather than restating it; without that file the parity run stops before its
-first case. The roundtrip leg in `make test` needs only `tiktoken.model` and
+first case. The roundtrip leg in `task test` needs only `tiktoken.model` and
 `tokenizer_config.json`.
 
 **`k3_model`**, the end-to-end gate, on a tiny model whose tensor graph matches the released

@@ -203,7 +203,7 @@ not as the engine's speed.
 ## Reproducing
 
 ```bash
-make -j
+task build
 ./scripts/k3-doctor.sh ~/k3model          # what this machine should manage
 ./benchmarks/memory-ladder.sh ~/k3model ~/k3trunk out/   # the full sweep
 ```

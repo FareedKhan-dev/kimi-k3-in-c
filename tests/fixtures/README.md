@@ -1,6 +1,6 @@
 # Test fixtures
 
-Everything the C test binaries read. All of it is checked in, so `make test` runs with no
+Everything the C test binaries read. All of it is checked in, so `task test` runs with no
 network access, no model weights, and no Python, which is the point: if correctness
 required the 1.56 TB checkpoint, correctness would not get checked.
 

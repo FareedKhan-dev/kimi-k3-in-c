@@ -3,10 +3,10 @@
 ## Before anything
 
 ```bash
-make -j && make test
+task build && task test
 ```
 
-`make test` needs no model weights and must stay green. If it is red on `main`, that is
+`task test` needs no model weights and must stay green. If it is red on `main`, that is
 the bug worth fixing first.
 
 ## The standard this codebase holds itself to
@@ -42,7 +42,7 @@ claim. See [docs/BENCHMARKING.md](docs/BENCHMARKING.md).
 
 ## Style
 
-- C99, 4-space indent, 90 columns. `make format` if you have clang-format.
+- C99, 4-space indent, 90 columns. `task format` if you have clang-format.
 - Warnings are errors in CI. In particular `-Wpointer-arith` is deliberate: weight
   pointers are `const void *`, and arithmetic on void strides by one byte under GCC
   silently returning the wrong tensor.
@@ -54,7 +54,7 @@ claim. See [docs/BENCHMARKING.md](docs/BENCHMARKING.md).
 1. Generate a fixture with `tools/emit_fixtures.py`, including its tolerance.
 2. Add the case to `tests/unit/test_ops.c`.
 3. Verify against the reference implementation in `tools/k3_ref.py`.
-4. Check it still holds on a real layer: `make test-all SHARD_DIR=...`.
+4. Check it still holds on a real layer: `task test-all SHARD_DIR=...`.
 
 ## Commits and PRs
 

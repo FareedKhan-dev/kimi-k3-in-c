@@ -15,16 +15,16 @@ fast its storage is. Storage matters more than you would expect, the engine move
 ## 2. Build
 
 ```bash
-make -j
+task build
 ```
 
 No dependencies beyond a C compiler and OpenMP. If `-march=native` is a problem (you are
-building for a different machine), use `make portable`.
+building for a different machine), use `task portable`.
 
 ## 3. Verify
 
 ```bash
-make test
+task test
 ```
 
 Seconds, and **no model weights required**. Op kernels, the streaming cache, the

@@ -1,0 +1,298 @@
+# Kimi K3 inference engine — Task build.
+#
+# Install Task: https://taskfile.dev/installation/  (brew install go-task, or the
+# one-line installer on that page).
+#
+#   task              build the engine (bin/k3)
+#   task test         run every test that needs no model weights
+#   task bench        kernel microbenchmarks
+#   task portable     build without -march/-mcpu=native (for distribution)
+#   task debug        -O0 -g with assertions
+#   task asan / ubsan sanitizer builds
+#   task format       clang-format the tree
+#   task clean
+#   task --list       show every task with its one-line description
+#
+# Nothing here requires a checkpoint. `task test` is the gate that must stay green.
+#
+# This replaces the old Makefile. GNU Make's platform branching (ifeq $(UNAME_S) ...)
+# is exactly the kind of thing that silently diverges between GNU Make (Linux) and BSD
+# Make (macOS, *BSD) once anyone reaches for a feature the two don't share. Task ships
+# one binary, one YAML task graph, and the platform detection below runs the same way
+# everywhere Task runs — no make-flavour differences to debug.
+#
+# PLATFORMS. Linux/x86-64 is the reference. macOS/arm64 works too, but needs Homebrew's
+# libomp for OpenMP (`brew install libomp`) because Apple Clang ships no OpenMP runtime;
+# the vars below detect and wire it up, same as the old Makefile did.
+
+version: '3'
+
+vars:
+  CC: '{{.CC | default "cc"}}'
+  PYTHON: '{{.PYTHON | default "python3"}}'
+  BUILD: '{{.BUILD | default "build"}}'
+  BIN: '{{.BIN | default "bin"}}'
+  PREFIX: '{{.PREFIX | default "/usr/local"}}'
+  FIXTURES: '{{.FIXTURES | default "tests/fixtures"}}'
+  TOK_FILES: '{{.TOK_FILES | default (printf "%s/k3model" (env "HOME"))}}'
+
+  UNAME_S:
+    sh: uname -s
+  UNAME_M:
+    sh: uname -m
+
+  # -march=native is x86 spelling; -mcpu= is the arm64 one and sets tuning too. `native`
+  # rather than a named core works from M1 through M5 and beyond. `task portable`, CI,
+  # and the sanitizer/debug tasks override ARCH explicitly (`task build ARCH="..."`,
+  # matching the old Makefile's `make ARCH=... all`).
+  ARCH_AUTO:
+    sh: |
+      if [ "{{.UNAME_S}}" = "Darwin" ] && [ "{{.UNAME_M}}" = "arm64" ]; then
+        echo "-mcpu=native"
+      else
+        echo "-march=native"
+      fi
+  ARCH: '{{.ARCH | default .ARCH_AUTO}}'
+
+  # Homebrew is /opt/homebrew on Apple Silicon, /usr/local on Intel. Fall back to the
+  # Apple Silicon default if brew is not on PATH, so any error names a real path.
+  OMP_PREFIX:
+    sh: brew --prefix libomp 2>/dev/null || echo /opt/homebrew/opt/libomp
+
+  # Apple Clang ships no OpenMP runtime; the flag must go through the preprocessor and
+  # the library must be linked explicitly. Everywhere else, plain -fopenmp is enough.
+  OMP_CFLAGS_AUTO:
+    sh: |
+      if [ "{{.UNAME_S}}" = "Darwin" ]; then
+        echo "-Xpreprocessor -fopenmp -I{{.OMP_PREFIX}}/include"
+      else
+        echo "-fopenmp"
+      fi
+  OMP_LDFLAGS_AUTO:
+    sh: |
+      if [ "{{.UNAME_S}}" = "Darwin" ]; then
+        echo "-L{{.OMP_PREFIX}}/lib -lomp"
+      else
+        echo "-fopenmp"
+      fi
+  OMP_CFLAGS: '{{.OMP_CFLAGS | default .OMP_CFLAGS_AUTO}}'
+  OMP_LDFLAGS: '{{.OMP_LDFLAGS | default .OMP_LDFLAGS_AUTO}}'
+
+  # -Wpointer-arith is not cosmetic: weight pointers are `const void *`, and arithmetic
+  # on a void pointer is a silent GNU extension that strides by ONE BYTE. Without this
+  # flag that mistake compiles clean under -Wall -Wextra and returns the wrong tensor.
+  WARN: '-Wall -Wextra -Wpointer-arith -Wshadow -Wvla -Wno-unused-parameter'
+
+  # -ffp-contract=off keeps floating-point results reproducible across compilers by
+  # disabling automatic FMA contraction. The test suite compares to a reference at a
+  # fixed tolerance; letting the compiler fuse changes results by more than that.
+  # -pthread is for the trunk's asynchronous reader (a plain pthread, not OpenMP); it
+  # composes with OMP_CFLAGS rather than replacing it.
+  CFLAGS_AUTO: '-O3 -std=gnu99 {{.WARN}} {{.ARCH}} {{.OMP_CFLAGS}} -pthread -ffp-contract=off'
+  LDFLAGS_AUTO: '-lm {{.OMP_LDFLAGS}} -pthread'
+  CFLAGS: '{{.CFLAGS | default .CFLAGS_AUTO}}'
+  LDFLAGS: '{{.LDFLAGS | default .LDFLAGS_AUTO}}'
+
+  INCLUDES: '-Iinclude -Iinclude/k3 -Ithird_party -Isrc/core -Isrc/io -Isrc/cache -Isrc/model -Isrc/tokenizer'
+
+  ENGINE_SRC: >-
+    src/core/k3_ops.c
+    src/io/k3_st.c src/io/k3_load.c src/io/k3_trunk.c
+    src/cache/k3_cache.c
+    src/model/k3_bind.c
+
+tasks:
+
+  default:
+    desc: build the engine (bin/k3)
+    cmds:
+      - task: build
+
+  build:
+    desc: build the engine (bin/k3)
+    sources:
+      - 'src/**/*.c'
+      - 'include/**/*.h'
+    generates:
+      - '{{.BIN}}/k3'
+    cmds:
+      - mkdir -p {{.BIN}}
+      - '{{.CC}} {{.CFLAGS}} {{.INCLUDES}} src/cli/k3_run.c {{.ENGINE_SRC}} -o {{.BIN}}/k3 {{.LDFLAGS}}'
+
+  test:
+    desc: everything that needs no model weights (the gate that must stay green)
+    deps: [build]
+    cmds:
+      - mkdir -p {{.BIN}} {{.BUILD}}
+      - '{{.CC}} {{.CFLAGS}} {{.INCLUDES}} tests/unit/test_ops.c src/core/k3_ops.c -o {{.BIN}}/test_ops {{.LDFLAGS}}'
+      - '{{.CC}} {{.CFLAGS}} {{.INCLUDES}} tests/unit/test_cache.c src/cache/k3_cache.c src/io/k3_load.c src/io/k3_st.c src/core/k3_ops.c -o {{.BIN}}/test_cache {{.LDFLAGS}}'
+      - '{{.CC}} {{.CFLAGS}} {{.INCLUDES}} tests/unit/test_st.c src/io/k3_st.c -o {{.BIN}}/test_st {{.LDFLAGS}}'
+      - '{{.CC}} -O2 -std=c99 {{.WARN}} -Wno-unused-function {{.INCLUDES}} tests/unit/test_tok.c -o {{.BIN}}/test_tok'
+      - '{{.CC}} -O2 -std=c99 {{.WARN}} -Wno-unused-function {{.INCLUDES}} tests/unit/test_cfg.c src/core/k3_ops.c -o {{.BIN}}/test_cfg -lm'
+      - '{{.CC}} {{.CFLAGS}} {{.INCLUDES}} tests/unit/scale_test.c src/core/k3_ops.c -o {{.BIN}}/scale_test {{.LDFLAGS}}'
+      - '{{.CC}} {{.CFLAGS}} {{.INCLUDES}} tests/unit/k3_model.c src/core/k3_ops.c -o {{.BIN}}/k3_model {{.LDFLAGS}}'
+      - |
+        set -e
+        echo "== op kernels ==";        ./{{.BIN}}/test_ops {{.FIXTURES}}/ops
+        echo "== streaming cache ==";   ./{{.BIN}}/test_cache {{.FIXTURES}}/cache
+        echo "== safetensors ==";       ./{{.BIN}}/test_st {{.FIXTURES}}/st {{.BUILD}}/st_index.json \
+            plain.f32.2d plain.bf16.1d tricky.f16.1d packed.u8.2d scalar.f32 second.shard.f32
+        echo "== config reader ==";     ./{{.BIN}}/test_cfg fixture {{.FIXTURES}}/ref_k3.json
+        echo "== config refusals =="
+        for f in no_layermap bad_layer_index bad_topk; do
+            ./{{.BIN}}/test_cfg reject {{.FIXTURES}}/cfg/$f.json || exit 1
+        done
+        echo "== tokenizer =="
+        if [ -f "{{.TOK_FILES}}/tiktoken.model" ]; then
+            ./{{.BIN}}/test_tok {{.TOK_FILES}} roundtrip src/core/k3_ops.c
+        else
+            echo "  NOT RUN: no tiktoken.model at {{.TOK_FILES}}"
+            echo "           the vocabulary ships with the checkpoint, not with this"
+            echo "           repository. Run: task tok TOK_FILES=/path/to/k3model"
+        fi
+        echo "== real dimensions ==";   ./{{.BIN}}/scale_test
+        echo "== full-model oracle =="; ./{{.BIN}}/k3_model {{.FIXTURES}}
+        echo
+        if [ ! -f "{{.TOK_FILES}}/tiktoken.model" ]; then
+            echo "NOTE: tokenizer parity did NOT run; see above. Everything else did."
+        fi
+        echo "ALL WEIGHTLESS TESTS PASSED"
+
+  test-all:
+    desc: 'adds tests that need a real checkpoint (pass SHARD_DIR=/path/to/shards)'
+    deps: [test]
+    requires:
+      vars: [SHARD_DIR]
+    cmds:
+      - task: weights-test
+        vars: {SHARD_DIR: '{{.SHARD_DIR}}'}
+
+  weights-test:
+    desc: 'tests that need real shards (pass SHARD_DIR=/path/to/shards)'
+    requires:
+      vars: [SHARD_DIR]
+    cmds:
+      - mkdir -p {{.BIN}}
+      - '{{.CC}} {{.CFLAGS}} {{.INCLUDES}} tests/unit/test_expert.c src/io/k3_load.c src/io/k3_st.c src/core/k3_ops.c -o {{.BIN}}/test_expert {{.LDFLAGS}}'
+      - '{{.CC}} {{.CFLAGS}} {{.INCLUDES}} tests/unit/test_real_layer.c {{.ENGINE_SRC}} -o {{.BIN}}/test_real_layer {{.LDFLAGS}}'
+      - './{{.BIN}}/test_expert {{.SHARD_DIR}} 1 64'
+      - './{{.BIN}}/test_real_layer {{.SHARD_DIR}} 1 4 8'
+
+  tok:
+    desc: 'tokenizer parity against the reference implementation (pass TOK_FILES=/path/to/k3model)'
+    cmds:
+      - mkdir -p {{.BIN}}
+      - '{{.CC}} -O2 -std=c99 {{.WARN}} -Wno-unused-function {{.INCLUDES}} tests/unit/test_tok.c -o {{.BIN}}/test_tok'
+      - '{{.PYTHON}} tools/tok_parity.py ./{{.BIN}}/test_tok'
+
+  cfg:
+    desc: 'config reader against both supported config layouts'
+    cmds:
+      - mkdir -p {{.BIN}}
+      - '{{.CC}} -O2 -std=c99 {{.WARN}} -Wno-unused-function {{.INCLUDES}} tests/unit/test_cfg.c src/core/k3_ops.c -o {{.BIN}}/test_cfg -lm'
+      - './{{.BIN}}/test_cfg fixture {{.FIXTURES}}/ref_k3.json'
+      - |
+        if [ -f "{{.TOK_FILES}}/config.json" ]; then
+            ./{{.BIN}}/test_cfg real {{.TOK_FILES}}/config.json
+        else
+            echo "  (skipped real config: none at {{.TOK_FILES}})"
+        fi
+
+  bench:
+    desc: kernel microbenchmarks, no weights required
+    cmds:
+      - mkdir -p {{.BIN}}
+      - '{{.CC}} {{.CFLAGS}} {{.INCLUDES}} benchmarks/bench_kernels.c src/core/k3_ops.c -o {{.BIN}}/bench_kernels {{.LDFLAGS}}'
+      - ./{{.BIN}}/bench_kernels
+
+  portable:
+    desc: 'drop the -march/-mcpu=native tuning, for a distributable binary'
+    cmds:
+      - |
+        set -e
+        mkdir -p {{.BIN}}
+        if [ "{{.UNAME_S}}/{{.UNAME_M}}" = "Darwin/arm64" ]; then
+          ARCH_FLAG=""
+        else
+          ARCH_FLAG="-mavx2 -mfma"
+        fi
+        {{.CC}} -O3 -std=gnu99 {{.WARN}} $ARCH_FLAG {{.OMP_CFLAGS}} -pthread -ffp-contract=off \
+            {{.INCLUDES}} src/cli/k3_run.c {{.ENGINE_SRC}} -o {{.BIN}}/k3 {{.LDFLAGS}}
+
+  debug:
+    desc: '-O0 -g, assertions on'
+    cmds:
+      - mkdir -p {{.BIN}}
+      - '{{.CC}} -O0 -g3 -std=gnu99 {{.WARN}} {{.OMP_CFLAGS}} -pthread -ffp-contract=off {{.INCLUDES}} src/cli/k3_run.c {{.ENGINE_SRC}} -o {{.BIN}}/k3 {{.LDFLAGS}}'
+
+  # Sanitizer builds drop OpenMP deliberately: ASan's interceptors and the OpenMP
+  # runtime's thread pool produce false positives together, and a serial build is the
+  # point of a sanitizer run.
+  asan:
+    desc: AddressSanitizer + UBSan build
+    cmds:
+      - mkdir -p {{.BIN}}
+      - '{{.CC}} -O1 -g -std=gnu99 {{.WARN}} -fsanitize=address,undefined -fno-omit-frame-pointer -pthread {{.INCLUDES}} src/cli/k3_run.c {{.ENGINE_SRC}} -o {{.BIN}}/k3 -lm -fsanitize=address,undefined -pthread'
+
+  ubsan:
+    desc: UndefinedBehaviorSanitizer build
+    cmds:
+      - mkdir -p {{.BIN}}
+      - '{{.CC}} -O1 -g -std=gnu99 {{.WARN}} -fsanitize=undefined -pthread {{.INCLUDES}} src/cli/k3_run.c {{.ENGINE_SRC}} -o {{.BIN}}/k3 -lm -fsanitize=undefined -pthread'
+
+  format:
+    desc: clang-format the tree
+    cmds:
+      - command -v clang-format >/dev/null || { echo "clang-format not installed"; exit 1; }
+      - clang-format -i $(find src include tests benchmarks -name '*.c' -o -name '*.h' 2>/dev/null)
+
+  # Installs the binary AND the public headers, matching CMake's install rules exactly:
+  # the two build systems are documented as interchangeable, so they must stay so.
+  install:
+    desc: 'install the binary and public headers (respects PREFIX, DESTDIR)'
+    deps: [build]
+    cmds:
+      - install -d "$DESTDIR{{.PREFIX}}/bin"
+      - install -m 755 {{.BIN}}/k3 "$DESTDIR{{.PREFIX}}/bin/k3"
+      - install -d "$DESTDIR{{.PREFIX}}/include/k3"
+      - install -m 644 include/k3/*.h "$DESTDIR{{.PREFIX}}/include/k3/"
+      - install -m 644 third_party/json.h "$DESTDIR{{.PREFIX}}/include/k3/"
+
+  clean:
+    desc: remove build/ and bin/
+    cmds:
+      - rm -rf {{.BUILD}} {{.BIN}}
+
+  doctor:
+    desc: check the toolchain, size RAM to a preset, measure storage
+    cmds:
+      - ./scripts/k3-doctor.sh
+
+  download:
+    desc: 'fetch the checkpoint (needs HF_TOKEN; pass MODEL_DIR=~/k3model)'
+    requires:
+      vars: [MODEL_DIR]
+    cmds:
+      - ./scripts/download-model.sh {{.MODEL_DIR}}
+
+  pack:
+    desc: 'pack the dense trunk (pass MODEL_DIR=~/k3model TRUNK_DIR=~/k3trunk)'
+    requires:
+      vars: [MODEL_DIR, TRUNK_DIR]
+    cmds:
+      - ./scripts/pack-trunk.sh {{.MODEL_DIR}} {{.TRUNK_DIR}}
+
+  run:
+    desc: 'run the engine (pass MODEL_DIR, TOK_DIR, PROMPT; TRUNK_DIR/PRESET optional)'
+    deps: [build]
+    requires:
+      vars: [MODEL_DIR, PROMPT]
+    vars:
+      PRESET: '{{.PRESET | default "laptop"}}'
+    cmds:
+      - |
+        set -e
+        TRUNK_ARGS=""
+        if [ -n "{{.TRUNK_DIR}}" ]; then TRUNK_ARGS="--trunk {{.TRUNK_DIR}}"; fi
+        ./{{.BIN}}/k3 {{.MODEL_DIR}} --preset {{.PRESET}} $TRUNK_ARGS \
+            --tok {{.TOK_DIR | default .MODEL_DIR}} --prompt "{{.PROMPT}}" --gen 8 --incremental

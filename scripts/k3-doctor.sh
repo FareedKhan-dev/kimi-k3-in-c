@@ -43,7 +43,7 @@ if command -v cc >/dev/null 2>&1 || command -v gcc >/dev/null 2>&1; then
 else
     bad "no C compiler found (install build-essential or equivalent)"
 fi
-command -v make >/dev/null 2>&1 && ok "make: $(make --version | head -1)" || bad "make not found"
+command -v task >/dev/null 2>&1 && ok "task: $(task --version | head -1)" || bad "task not found (see https://taskfile.dev/installation/)"
 if command -v python3 >/dev/null 2>&1; then
     ok "python3: $(python3 --version 2>&1)"
 else
@@ -86,12 +86,12 @@ if [ -n "$PRESET" ]; then
 else
     # A warning, not a failure. This threshold is about RUNNING the checkpoint; it says
     # nothing about building the engine or running the test suite, both of which need no
-    # weights and pass comfortably here. `make test`'s own ceiling is the ~1.7 GB single
+    # weights and pass comfortably here. `task test`'s own ceiling is the ~1.7 GB single
     # allocation in tests/unit/scale_test.c. Failing the whole check on this number told
     # people their machine was broken when the only thing they could not do was the one
     # thing that needs 1.56 TB of disk they also did not have.
     warn "under 10 GB available, below the floor for running the checkpoint (~8.2 GB peak RSS)"
-    printf '  %s      the build and "make test" need no weights and work fine here%s\n' \
+    printf '  %s      the build and "task test" need no weights and work fine here%s\n' \
         "$DIM" "$RST"
 fi
 
@@ -159,7 +159,7 @@ if [ "$FAILED" -eq 0 ]; then
     if [ -n "$PRESET" ]; then
         M="${MODEL_DIR:-<model_dir>}"
         printf '\n  next:\n'
-        printf '    %smake -j%s\n' "$DIM" "$RST"
+        printf '    %stask build%s\n' "$DIM" "$RST"
         printf '    %s./scripts/pack-trunk.sh %s ~/k3trunk%s\n' "$DIM" "$M" "$RST"
         printf '    %s./bin/k3 %s --trunk ~/k3trunk --preset %s \\%s\n' "$DIM" "$M" "$PRESET" "$RST"
         printf '    %s         --tok %s --prompt "Hello" --gen 8 --incremental%s\n' "$DIM" "$M" "$RST"
@@ -168,8 +168,8 @@ if [ "$FAILED" -eq 0 ]; then
         # the README's Quick start. Printing nothing here was what made the old FAIL
         # read as "give up".
         printf '\n  next:\n'
-        printf '    %smake -j%s\n' "$DIM" "$RST"
-        printf '    %smake test%s\n' "$DIM" "$RST"
+        printf '    %stask build%s\n' "$DIM" "$RST"
+        printf '    %stask test%s\n' "$DIM" "$RST"
         printf '  %sboth need no checkpoint. Running the model needs ~10 GB of RAM and%s\n' \
             "$DIM" "$RST"
         printf '  %s~1.7 TB of disk; come back with those and re-run this check.%s\n' \

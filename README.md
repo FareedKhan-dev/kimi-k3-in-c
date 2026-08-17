@@ -9,7 +9,7 @@
 <p>
 <a href="https://github.com/FareedKhan-dev/kimi-k3-in-c/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/FareedKhan-dev/kimi-k3-in-c/ci.yml?branch=main&style=flat-square&label=CI" alt="CI"></a>
 <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square" alt="License"></a>
-<a href="Makefile"><img src="https://img.shields.io/badge/C99-portable-lightgrey?style=flat-square" alt="C99"></a>
+<a href="Taskfile.yml"><img src="https://img.shields.io/badge/C99-portable-lightgrey?style=flat-square" alt="C99"></a>
 <a href="#requirements"><img src="https://img.shields.io/badge/platform-Linux%20x86--64-lightgrey?style=flat-square" alt="Platform"></a>
 <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-1.0.0-brightgreen?style=flat-square" alt="Version"></a>
 </p>
@@ -201,27 +201,39 @@ The gate is storage: **the checkpoint is 1.56 TB.** Everything else is ordinary.
 | | | |
 |---|---|---|
 | **OS** | Linux, x86-64 | uses `O_DIRECT`, `posix_memalign`, `getrusage` |
-| **CPU** | AVX2 + FMA | AVX-512 unnecessary. `make portable` targets generic AVX2 |
+| **CPU** | AVX2 + FMA | AVX-512 unnecessary. `task portable` targets generic AVX2 |
 | **RAM** | 8 GB and up | every preset works; more memory is faster, never different |
 | **Storage** | ~1.7 TB free | 1.56 TB checkpoint + 109 GB packed trunk, ideally on fast local disk |
-| **Toolchain** | GCC ≥ 9 or Clang ≥ 10 | GNU make, or CMake |
-| **Python** | 3.9+ | for the download, pack and analysis tools; not for `make test` |
+| **Toolchain** | GCC ≥ 9 or Clang ≥ 10 | [Task](https://taskfile.dev), or CMake |
+| **Python** | 3.9+ | for the download, pack and analysis tools; not for `task test` |
 
 The tokenizer and config reader are portable C99 and build anywhere. Without a checkpoint
 you can still do everything in [Quick start](#quick-start).
 
 ## Quick start
 
-Clone, build and run the entire test suite. **No checkpoint, no network, no Python**. The
-whole thing takes about a minute.
+The build is driven by [Task](https://taskfile.dev), a small single-binary command
+runner (not GNU Make: one YAML file instead of Make's dialect, and no OS-specific
+`ifeq`/`ifdef` branching to keep macOS and Linux in sync). Install it once:
+
+```bash
+brew install go-task              # macOS, or Linux with Homebrew
+# or: sh -c "$(curl -fsSL https://taskfile.dev/install.sh)" -- -d -b ~/.local/bin
+task --version
+```
+
+Then clone, build and run the entire test suite. **No checkpoint, no network, no
+Python**. The whole thing takes about a minute.
 
 ```bash
 git clone https://github.com/FareedKhan-dev/kimi-k3-in-c.git
 cd kimi-k3-in-c
 
-make -j            # seconds. Seven C files, a compiler and OpenMP
-make test          # under a minute
+task build          # seconds. Seven C files, a compiler and OpenMP
+task test           # under a minute
 ```
+
+`task --list` shows every task with a one-line description.
 
 It ends like this, or it failed:
 
@@ -279,7 +291,7 @@ non-zero if the machine cannot run the model at all.
 ### Step 2. build
 
 ```bash
-make -j
+task build
 ```
 
 Seconds. The only dependencies are a C99 compiler, libm and OpenMP. CMake works too:
@@ -291,7 +303,7 @@ cmake -B build && cmake --build build -j && ctest --test-dir build
 ### Step 3. verify before downloading anything
 
 ```bash
-make test
+task test
 ```
 
 This is worth doing before committing to a 1.56 TB download: it proves the engine matches
@@ -579,7 +591,7 @@ times slower than local NVMe; keep `~/k3trunk` local.
 regardless of budget, and the engine computes that up front rather than discovering it an
 hour in. Shorten the request, or drop `--incremental`, which carries no KV cache at all.
 
-**Is the whole 1.56 TB needed?** For generation, yes. For development, no: `make test`
+**Is the whole 1.56 TB needed?** For generation, yes. For development, no: `task test`
 needs nothing at all, and `--layers N` runs against partial shard sets.
 
 **macOS, Windows, WSL?** The engine targets Linux. The tokenizer and config reader are
@@ -3380,10 +3392,10 @@ model itself.
 ## Development
 
 ```bash
-make test        # the gate that stays green, no weights, no network, no Python
-make help        # the documented targets
-make asan        # AddressSanitizer and UBSan
-make portable    # generic AVX2, without -march=native
+task test         # the gate that stays green, no weights, no network, no Python
+task --list       # the documented tasks
+task asan         # AddressSanitizer and UBSan
+task portable     # generic AVX2, without -march=native
 ```
 
 CI runs the same gates: a GCC and Clang matrix under `-Werror`, sanitizers over the parsers

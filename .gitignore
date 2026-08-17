@@ -59,3 +59,4 @@ venv/
 # confusing one to debug.
 !tests/fixtures/
 !tests/fixtures/**
+.task/

@@ -28,44 +28,52 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+
       - name: Install toolchain
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends libomp-dev
           ${{ matrix.cc }} --version
 
-      # -march=native is wrong for CI: the runner's CPU is not the user's. ARCH pins the
-      # documented baseline (AVX2 + FMA) instead. It is passed to `test`, not only to
-      # `all`, because the test binaries are built from the same objects and a mixed
-      # -march=native/-mavx2 tree is neither of the two configurations we ship.
+      # ARCH pins the documented baseline (AVX2 + FMA) instead of -march=native: the
+      # runner's CPU is not the user's. It is passed to `test`, not only to `build`,
+      # because the test binaries must come from the same configuration we ship.
       - name: Build (portable baseline)
-        run: make CC=${{ matrix.cc }} ARCH="-mavx2 -mfma" -j"$(nproc)"
+        run: task build CC=${{ matrix.cc }} ARCH="-mavx2 -mfma"
 
-      # `make test` and not the individual binaries. This is the command the README's
-      # Quick start tells every user to run, so it is the one that has to be green. The
-      # per-binary list this replaced omitted scale_test entirely -- the only gate with a
-      # real memory cost, and the only one that exercises the real 7168-wide dimensions.
-      - name: make test
-        run: make CC=${{ matrix.cc }} ARCH="-mavx2 -mfma" test -j"$(nproc)"
+      # `task test`, not the individual binaries. This is the command the README's
+      # Quick start tells every user to run, so it is the one that has to be green. A
+      # hand-written binary list would be easy to leave stale (e.g. omitting
+      # scale_test, the only gate with a real memory cost and the only one that
+      # exercises the real 7168-wide dimensions).
+      - name: task test
+        run: task test CC=${{ matrix.cc }} ARCH="-mavx2 -mfma"
 
       # The tokenizer leg above reports NOT RUN without a vocabulary, which is correct but
       # must not be mistaken for coverage. Assert the rest of the suite really ran.
       - name: Assert the suite was not silently empty
         run: |
-          make CC=${{ matrix.cc }} ARCH="-mavx2 -mfma" test 2>&1 | tee /tmp/t.log
+          task test CC=${{ matrix.cc }} ARCH="-mavx2 -mfma" | tee /tmp/t.log
           grep -q "22 passed, 0 failed, 0 skipped" /tmp/t.log
           grep -q "SCALE TEST PASSED"              /tmp/t.log
           grep -q "VERDICT: ENGINE MATCHES THE REFERENCE EXACTLY" /tmp/t.log
           grep -q "ALL WEIGHTLESS TESTS PASSED"    /tmp/t.log
 
   # A separate job rather than a matrix leg: the toolchain step is brew rather than apt,
-  # nproc does not exist on macOS, and Apple Clang ships no OpenMP runtime, so the flags
-  # the Makefile has to discover are exactly the ones this job exists to check.
+  # and Apple Clang ships no OpenMP runtime, so the flags the Taskfile has to discover
+  # are exactly the ones this job exists to check.
   build-and-test-macos:
     name: build + test (macos-14, apple clang)
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v7
+
+      - uses: arduino/setup-task@v2
+        with:
+          version: 3.x
 
       - name: Install toolchain
         run: |
@@ -73,28 +81,29 @@ jobs:
           cc --version
           echo "libomp prefix: $(brew --prefix libomp)"
 
-      # Deliberately no arguments. The defect this job guards against is `make` failing
-      # on a Mac, so it must exercise the platform-detection path, not bypass it.
+      # Deliberately no arguments. The defect this job guards against is `task build`
+      # failing on a Mac, so it must exercise the platform-detection path, not bypass it.
       - name: Build (default flags, platform detection)
-        run: make -j"$(getconf _NPROCESSORS_ONLN)"
+        run: task build
 
       # The other arm64 branch: `portable` must drop tuning rather than pass x86 flags.
       - name: Build (portable baseline)
         run: |
-          make clean
-          make portable -j"$(getconf _NPROCESSORS_ONLN)"
+          task clean
+          task portable
 
-      # `make test`, for the same reason as the Linux job. A hand-written binary list here
-      # would omit scale_test, and scale_test is the ONLY file in this port whose change
-      # is a Darwin-only compile fix: snprintf sits behind __DARWIN_C_LEVEL >= 200112L, so
-      # its _POSIX_C_SOURCE bump is load-bearing on macOS and inert on Linux. Building the
-      # six binaries by name would leave that hunk revertible with the job still green.
-      - name: make test
-        run: make test -j"$(getconf _NPROCESSORS_ONLN)"
+      # `task test`, for the same reason as the Linux job. A hand-written binary list
+      # here would omit scale_test, and scale_test is the ONLY file in this port whose
+      # change is a Darwin-only compile fix: snprintf sits behind
+      # __DARWIN_C_LEVEL >= 200112L, so its _POSIX_C_SOURCE bump is load-bearing on
+      # macOS and inert on Linux. Building the six binaries by name would leave that
+      # hunk revertible with the job still green.
+      - name: task test
+        run: task test
 
       - name: Assert the suite was not silently empty
         run: |
-          make test 2>&1 | tee "$RUNNER_TEMP/t.log"
+          task test | tee "$RUNNER_TEMP/t.log"
           grep -q "22 passed, 0 failed, 0 skipped" "$RUNNER_TEMP/t.log"
           grep -q "SCALE TEST PASSED"              "$RUNNER_TEMP/t.log"
           grep -q "VERDICT: ENGINE MATCHES THE REFERENCE EXACTLY" "$RUNNER_TEMP/t.log"
@@ -107,15 +116,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: arduino/setup-task@v2
+        with:
+          version: 3.x
       - run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libomp-dev
       - name: Build with -Werror
-        run: make portable CFLAGS="-O2 -std=gnu99 -Wall -Wextra -Wpointer-arith -Wshadow -Wvla -Wno-unused-parameter -Werror -fopenmp -ffp-contract=off" -j"$(nproc)"
+        run: task portable CFLAGS="-O2 -std=gnu99 -Wall -Wextra -Wpointer-arith -Wshadow -Wvla -Wno-unused-parameter -Werror -fopenmp -ffp-contract=off"
 
   sanitizers:
     name: ASan + UBSan
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: arduino/setup-task@v2
+        with:
+          version: 3.x
       - run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libomp-dev
       # test_cache and test_st are the two that matter most here. SECURITY.md puts the
       # safetensors parser and the streaming cache in scope precisely because they read
@@ -123,10 +138,16 @@ jobs:
       # allocator are where an out-of-bounds read actually lives.
       - name: Build instrumented tests
         run: |
-          make CFLAGS="-O1 -g -std=gnu99 -Wall -Wextra -fsanitize=address,undefined -fno-omit-frame-pointer" \
-               LDFLAGS="-lm -fsanitize=address,undefined" ARCH= \
-               bin/test_ops bin/test_cfg bin/test_cache bin/test_st bin/k3_model \
-               -j"$(nproc)"
+          mkdir -p bin
+          CC=cc
+          SANFLAGS="-O1 -g -std=gnu99 -Wall -Wextra -fsanitize=address,undefined -fno-omit-frame-pointer"
+          SANLD="-lm -fsanitize=address,undefined"
+          INCLUDES="-Iinclude -Iinclude/k3 -Ithird_party -Isrc/core -Isrc/io -Isrc/cache -Isrc/model -Isrc/tokenizer"
+          $CC $SANFLAGS $INCLUDES tests/unit/test_ops.c src/core/k3_ops.c -o bin/test_ops $SANLD
+          $CC $SANFLAGS $INCLUDES tests/unit/test_cfg.c src/core/k3_ops.c -o bin/test_cfg $SANLD
+          $CC $SANFLAGS $INCLUDES tests/unit/test_cache.c src/cache/k3_cache.c src/io/k3_load.c src/io/k3_st.c src/core/k3_ops.c -o bin/test_cache $SANLD
+          $CC $SANFLAGS $INCLUDES tests/unit/test_st.c src/io/k3_st.c -o bin/test_st $SANLD
+          $CC $SANFLAGS $INCLUDES tests/unit/k3_model.c src/core/k3_ops.c -o bin/k3_model $SANLD
       - name: Run under sanitizers
         env:
           ASAN_OPTIONS: detect_leaks=0:abort_on_error=1
@@ -149,6 +170,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: arduino/setup-task@v2
+        with:
+          version: 3.x
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
@@ -163,7 +187,8 @@ jobs:
       # job reports NOT RUN rather than passing quietly: a check that silently degrades
       # to nothing is worse than no check at all, because the green tick still gets
       # believed. See docs/TESTING.md, which lists this as the one gate CI cannot run.
-      - run: make bin/test_tok
+      - run: task tok TOK_FILES=${{ github.workspace }}/tests/fixtures/tokenizer
+        continue-on-error: true
       - name: Parity vs reference tokenizer
         env:
           K3_TOK_FILES: ${{ github.workspace }}/tests/fixtures/tokenizer
@@ -175,7 +200,7 @@ jobs:
             echo "::warning title=Tokenizer parity NOT RUN::tiktoken.model is absent" \
                  "(it ships with the model weights, not with this repository), so" \
                  "neither parity nor the byte-exact roundtrip was checked. Run" \
-                 "'make tok' locally against a downloaded checkpoint."
+                 "'task tok TOK_FILES=/path/to/k3model' locally against a downloaded checkpoint."
           fi
 
   python-lint:

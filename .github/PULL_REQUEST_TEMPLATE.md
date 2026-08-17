@@ -8,10 +8,10 @@
 
 ## Verification
 
-- [ ] `make test` passes (all weightless gates)
-- [ ] `make portable` builds with no new warnings
+- [ ] `task test` passes (all weightless gates)
+- [ ] `task portable` builds with no new warnings
 - [ ] If kernels changed: `./bin/test_ops tests/fixtures/ops` still passes at declared tolerance
-- [ ] If the config or tokenizer path changed: `make cfg` and `make tok` pass
+- [ ] If the config or tokenizer path changed: `task cfg` and `task tok` pass
 - [ ] If output could change: the oracle gates (`./bin/k3_model tests/fixtures`) still match exactly
 
 ## Numbers, if this is a performance change

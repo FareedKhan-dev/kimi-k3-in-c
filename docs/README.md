@@ -46,7 +46,7 @@ claims and where each is substantiated:
 
 3. **The engine matches a reference implementation exactly.** Teacher forcing, greedy
    decode, and incremental decode, on a model with the released tensor graph.
-   [TESTING.md](TESTING.md); `make test` runs it in seconds with no weights.
+   [TESTING.md](TESTING.md); `task test` runs it in seconds with no weights.
 
 Claims about *speed* carry a caveat that [PERFORMANCE.md](PERFORMANCE.md) states up
 front: run-to-run variance on identical configurations is 33%
