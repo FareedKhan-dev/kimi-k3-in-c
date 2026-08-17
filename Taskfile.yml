@@ -270,25 +270,27 @@ tasks:
       - ./scripts/k3-doctor.sh
 
   download:
-    desc: 'fetch the checkpoint (needs HF_TOKEN; pass MODEL_DIR=~/k3model)'
-    requires:
-      vars: [MODEL_DIR]
+    desc: 'fetch the checkpoint (needs HF_TOKEN; default MODEL_DIR=~/k3model)'
+    vars:
+      MODEL_DIR: '{{.MODEL_DIR | default (printf "%s/k3model" (env "HOME"))}}'
     cmds:
       - ./scripts/download-model.sh {{.MODEL_DIR}}
 
   pack:
-    desc: 'pack the dense trunk (pass MODEL_DIR=~/k3model TRUNK_DIR=~/k3trunk)'
-    requires:
-      vars: [MODEL_DIR, TRUNK_DIR]
+    desc: 'pack the dense trunk (default MODEL_DIR=~/k3model TRUNK_DIR=~/k3trunk)'
+    vars:
+      MODEL_DIR: '{{.MODEL_DIR | default (printf "%s/k3model" (env "HOME"))}}'
+      TRUNK_DIR: '{{.TRUNK_DIR | default (printf "%s/k3trunk" (env "HOME"))}}'
     cmds:
       - ./scripts/pack-trunk.sh {{.MODEL_DIR}} {{.TRUNK_DIR}}
 
   run:
-    desc: 'run the engine (pass MODEL_DIR, TOK_DIR, PROMPT; TRUNK_DIR/PRESET optional)'
+    desc: 'run the engine (default MODEL_DIR=~/k3model; pass PROMPT; TRUNK_DIR/PRESET optional)'
     deps: [build]
     requires:
-      vars: [MODEL_DIR, PROMPT]
+      vars: [PROMPT]
     vars:
+      MODEL_DIR: '{{.MODEL_DIR | default (printf "%s/k3model" (env "HOME"))}}'
       PRESET: '{{.PRESET | default "laptop"}}'
     cmds:
       - |
