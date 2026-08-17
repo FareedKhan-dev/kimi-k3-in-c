@@ -255,7 +255,7 @@ One published measurement also replays on the spot, from a trace recorded during
 93-layer run (this one needs Python 3.9+ and numpy):
 
 ```bash
-python3 tools/sim_cache.py tests/fixtures/expert_trace.bin
+task sim-cache
 ```
 
 100,096 expert requests, reprinting the capacity table in
@@ -265,8 +265,9 @@ python3 tools/sim_cache.py tests/fixtures/expert_trace.bin
 
 Six steps from an empty directory to generated text. Only step 4 is slow.
 
-`./scripts/k3-doctor.sh` can be run at any point. It checks the toolchain, sizes your RAM
-to a preset, measures your storage, and prints the exact command to run next.
+`task doctor` (or `./scripts/k3-doctor.sh` directly) can be run at any point. It checks
+the toolchain, sizes your RAM to a preset, measures your storage, and prints the exact
+command to run next.
 
 ### Step 0. clone
 
@@ -280,7 +281,9 @@ About 45 MB, most of it the diagrams and the test fixtures.
 ### Step 1. check the machine
 
 ```bash
-./scripts/k3-doctor.sh
+task doctor
+# or, pointed at where the checkpoint will live, to also check storage there:
+task doctor MODEL_DIR=~/k3model
 ```
 
 Takes about a minute, because it measures your disk the way the engine reads it. It exits
@@ -341,7 +344,7 @@ opposite directions by the same amount.
 ### Step 5. pack the trunk
 
 ```bash
-./scripts/pack-trunk.sh ~/k3model ~/k3trunk
+task pack
 ```
 
 About four minutes, once. It rewrites the 93 dense layers into one 109 GB file where layer
@@ -351,9 +354,11 @@ memory requirement into a dial.** Put the output on the fastest disk you have.
 ### Step 6. run
 
 ```bash
-./bin/k3 ~/k3model --trunk ~/k3trunk --preset workstation \
-         --tok ~/k3model --prompt "The capital of France is" --gen 8 --incremental
+task run PROMPT="The capital of France is" PRESET=workstation TRUNK_DIR=~/k3trunk
 ```
+
+(equivalent to calling `./bin/k3` directly with `--trunk ~/k3trunk --preset workstation
+--tok ~/k3model --prompt "..." --gen 8 --incremental`)
 
 The tokenizer ships with the checkpoint, which is why `--tok` points at the model
 directory.

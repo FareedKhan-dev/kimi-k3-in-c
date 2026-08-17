@@ -14,6 +14,8 @@
 #   task clean
 #   task py-sync      install Python tool deps (numpy/torch/tiktoken) via uv
 #   task hf-cli       install the `hf` CLI needed by `task download`
+#   task doctor       check toolchain/RAM/storage, suggest a preset
+#   task sim-cache    replay the streaming-cache trace, no weights needed
 #
 # Nothing here requires a checkpoint. `task test` is the gate that must stay green.
 #
@@ -190,6 +192,12 @@ tasks:
       - 'command -v uv >/dev/null || { echo "uv not found: https://docs.astral.sh/uv/getting-started/installation/"; exit 1; }'
       - uv sync --group dev
 
+  sim-cache:
+    desc: replay the streaming-cache trace and reprint its published capacity table
+    deps: [py-sync]
+    cmds:
+      - uv run tools/sim_cache.py tests/fixtures/expert_trace.bin
+
   tok:
     desc: 'tokenizer parity against the reference implementation (pass TOK_FILES=/path/to/k3model)'
     deps: [py-sync]
@@ -277,9 +285,9 @@ tasks:
       - rm -rf {{.BUILD}} {{.BIN}}
 
   doctor:
-    desc: check the toolchain, size RAM to a preset, measure storage
+    desc: 'check the toolchain, size RAM to a preset, measure storage (optional MODEL_DIR)'
     cmds:
-      - ./scripts/k3-doctor.sh
+      - ./scripts/k3-doctor.sh {{.MODEL_DIR}}
 
   # `hf` needs to be a global command (download-model.sh calls it by name on PATH), not
   # a project-venv dependency, so this uses `uv tool install` -- uv's pipx equivalent --
