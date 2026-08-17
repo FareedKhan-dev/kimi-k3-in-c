@@ -3,7 +3,8 @@
 # Install Task: https://taskfile.dev/installation/  (brew install go-task, or the
 # one-line installer on that page).
 #
-#   task              build the engine (bin/k3)
+#   task              list every task (same as task --list)
+#   task build        build the engine (bin/k3)
 #   task test         run every test that needs no model weights
 #   task bench        kernel microbenchmarks
 #   task portable     build without -march/-mcpu=native (for distribution)
@@ -11,7 +12,6 @@
 #   task asan / ubsan sanitizer builds
 #   task format       clang-format the tree
 #   task clean
-#   task --list       show every task with its one-line description
 #
 # Nothing here requires a checkpoint. `task test` is the gate that must stay green.
 #
@@ -104,9 +104,10 @@ vars:
 tasks:
 
   default:
-    desc: build the engine (bin/k3)
+    desc: list every task (run `task build` to actually build)
+    silent: true
     cmds:
-      - task: build
+      - task --list
 
   build:
     desc: build the engine (bin/k3)
