@@ -12,6 +12,8 @@
 #   task asan / ubsan sanitizer builds
 #   task format       clang-format the tree
 #   task clean
+#   task py-sync      install Python tool deps (numpy/torch/tiktoken) via uv
+#   task hf-cli       install the `hf` CLI needed by `task download`
 #
 # Nothing here requires a checkpoint. `task test` is the gate that must stay green.
 #
@@ -179,12 +181,22 @@ tasks:
       - './{{.BIN}}/test_expert {{.SHARD_DIR}} 1 64'
       - './{{.BIN}}/test_real_layer {{.SHARD_DIR}} 1 4 8'
 
+  # Python tools (fixture regen, parity checks, cache replay) are managed with uv, a
+  # single static binary that reads pyproject.toml/uv.lock and gives everyone the exact
+  # same resolved versions — no more guessing what to `pip install` first.
+  py-sync:
+    desc: install the Python tool dependencies (numpy, torch, tiktoken) via uv
+    cmds:
+      - 'command -v uv >/dev/null || { echo "uv not found: https://docs.astral.sh/uv/getting-started/installation/"; exit 1; }'
+      - uv sync --group dev
+
   tok:
     desc: 'tokenizer parity against the reference implementation (pass TOK_FILES=/path/to/k3model)'
+    deps: [py-sync]
     cmds:
       - mkdir -p {{.BIN}}
       - '{{.CC}} -O2 -std=c99 {{.WARN}} -Wno-unused-function {{.INCLUDES}} tests/unit/test_tok.c -o {{.BIN}}/test_tok'
-      - '{{.PYTHON}} tools/tok_parity.py ./{{.BIN}}/test_tok'
+      - 'uv run tools/tok_parity.py ./{{.BIN}}/test_tok'
 
   cfg:
     desc: 'config reader against both supported config layouts'
@@ -269,8 +281,19 @@ tasks:
     cmds:
       - ./scripts/k3-doctor.sh
 
+  # `hf` needs to be a global command (download-model.sh calls it by name on PATH), not
+  # a project-venv dependency, so this uses `uv tool install` -- uv's pipx equivalent --
+  # rather than `uv sync`. Pinned exactly for the same reason as pyproject.toml: an
+  # unattended tool install is not somewhere to accept whatever the latest release is.
+  hf-cli:
+    desc: install the `hf` CLI (huggingface_hub==1.27.0) globally via `uv tool install`
+    cmds:
+      - 'command -v uv >/dev/null || { echo "uv not found: https://docs.astral.sh/uv/getting-started/installation/"; exit 1; }'
+      - command -v hf >/dev/null || uv tool install huggingface_hub==1.27.0
+
   download:
     desc: 'fetch the checkpoint (needs HF_TOKEN; default MODEL_DIR=~/k3model)'
+    deps: [hf-cli]
     vars:
       MODEL_DIR: '{{.MODEL_DIR | default (printf "%s/k3model" (env "HOME"))}}'
     cmds:

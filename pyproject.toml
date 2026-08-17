@@ -1,0 +1,21 @@
+[project]
+name = "kimi-k3-in-c"
+version = "1.0.0"
+description = "Python tooling for the Kimi K3 inference engine: fixture generation, reference-vs-C conformance, cache replay"
+requires-python = ">=3.12"
+# Pinned exact, not a range: a range lets a future malicious or merely-broken release of
+# any of these land in someone's environment un-reviewed the next time they run `uv sync`.
+# uv.lock pins the same versions again with content hashes, so this is belt-and-braces
+# rather than the only line of defense; see the PR description for the full reasoning.
+dependencies = [
+    "numpy==2.5.2",
+    "torch==2.13.0",
+]
+
+[dependency-groups]
+# Lint/CI-only. tiktoken is the reference tokenizer tools/tok_parity.py checks against;
+# it is never a runtime dependency of the C engine.
+dev = [
+    "ruff==0.16.3",
+    "tiktoken==0.13.0",
+]

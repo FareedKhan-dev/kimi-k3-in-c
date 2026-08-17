@@ -222,7 +222,7 @@ The gate is storage: **the checkpoint is 1.56 TB.** Everything else is ordinary.
 | **RAM** | 8 GB and up | every preset works; more memory is faster, never different |
 | **Storage** | ~1.7 TB free | 1.56 TB checkpoint + 109 GB packed trunk, ideally on fast local disk |
 | **Toolchain** | GCC ≥ 9 or Clang ≥ 10 | [Task](https://taskfile.dev), or CMake |
-| **Python** | 3.9+ | for the download, pack and analysis tools; not for `task test` |
+| **Python** | 3.12+ | for the download, pack and analysis tools; not for `task test`. Deps are pinned and installed via [uv](https://docs.astral.sh/uv/) — `task py-sync` |
 
 The tokenizer and config reader are portable C99 and build anywhere. Without a checkpoint
 you can still do everything in [Quick start](#quick-start).
@@ -315,8 +315,12 @@ repository.
 
 ```bash
 export HF_TOKEN=hf_your_token_here          # read from the environment, never echoed
-./scripts/download-model.sh ~/k3model       # resumable, re-run to continue
+task download MODEL_DIR=~/k3model           # resumable, re-run to continue
 ```
+
+`task download` installs its own `hf` CLI dependency first if it is missing (pinned exactly,
+via `uv tool install`), so there is nothing to set up by hand before this step. Calling
+`./scripts/download-model.sh ~/k3model` directly still works, but then `hf` is on you.
 
 The script finishes by verifying the shard count, the exact byte total, and then every
 individual per-shard size against the published figures:
@@ -3394,6 +3398,7 @@ task test         # the gate that stays green, no weights, no network, no Python
 task --list       # the documented tasks
 task asan         # AddressSanitizer and UBSan
 task portable     # generic AVX2, without -march=native
+task py-sync      # installs tools/ deps (numpy, torch, tiktoken), pinned via uv
 ```
 
 CI runs the same gates: a GCC and Clang matrix under `-Werror`, sanitizers over the parsers

@@ -109,6 +109,23 @@ jobs:
           grep -q "VERDICT: ENGINE MATCHES THE REFERENCE EXACTLY" "$RUNNER_TEMP/t.log"
           grep -q "ALL WEIGHTLESS TESTS PASSED"    "$RUNNER_TEMP/t.log"
 
+  # Regression check for the Make -> Task migration: CMakeLists.txt claims the two build
+  # systems are "documented as interchangeable", but before this job nothing in CI ever
+  # built or ran the CMake path, so that claim was unverified. This proves it: the same
+  # weightless oracle test that gates the Task build must also pass under CMake/ctest.
+  cmake-build-and-test:
+    name: build + test (CMake)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libomp-dev
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build -j
+      - name: ctest
+        run: ctest --test-dir build --output-on-failure
+
   # Warnings are defects here. The engine does arithmetic on `const void *` weight
   # pointers, where a missing -Wpointer-arith silently strides by one byte.
   strict-warnings:
@@ -173,10 +190,7 @@ jobs:
       - uses: arduino/setup-task@v2
         with:
           version: 3.x
-      - uses: actions/setup-python@v7
-        with:
-          python-version: '3.12'
-      - run: pip install --quiet tiktoken
+      - uses: astral-sh/setup-uv@v7
 
       # This job compiles the tokenizer and, when the vocabulary is available, checks it
       # against the reference implementation.
@@ -195,7 +209,7 @@ jobs:
         run: |
           if [ -f "$K3_TOK_FILES/tiktoken.model" ]; then
             ./bin/test_tok "$K3_TOK_FILES" roundtrip README.md
-            python tools/tok_parity.py ./bin/test_tok
+            uv run tools/tok_parity.py ./bin/test_tok
           else
             echo "::warning title=Tokenizer parity NOT RUN::tiktoken.model is absent" \
                  "(it ships with the model weights, not with this repository), so" \
@@ -208,15 +222,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with:
-          python-version: '3.12'
-      - run: pip install --quiet ruff
+      - uses: astral-sh/setup-uv@v7
+      - run: uv sync --group dev
       # Gates. Style drift in tools that generate the test fixtures is worth catching,
       # and an unparseable tool is a broken fixture pipeline.
-      - run: ruff check tools/ --output-format=github
+      - run: uv run ruff check tools/ --output-format=github
       - name: Syntax check every tool
-        run: python -m compileall -q tools/
+        run: uv run python -m compileall -q tools/
 
   shellcheck:
     name: shellcheck
