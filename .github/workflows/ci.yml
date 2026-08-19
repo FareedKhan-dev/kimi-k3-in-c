@@ -100,6 +100,91 @@ jobs:
           grep -q "VERDICT: ENGINE MATCHES THE REFERENCE EXACTLY" "$RUNNER_TEMP/t.log"
           grep -q "ALL WEIGHTLESS TESTS PASSED"    "$RUNNER_TEMP/t.log"
 
+  # A separate job rather than a matrix leg, for the same reason as macOS: the setup
+  # action is MSYS2-specific, and the platform-detection block in the Makefile has a
+  # dedicated Windows branch (matched on the MINGW substring of `uname -s`) that only
+  # this job exercises. `make`, not the individual binaries -- the defect this job
+  # guards against is `make` itself failing on Windows, the same rationale as the
+  # macOS "default flags, platform detection" step.
+  build-and-test-windows:
+    name: build + test (windows-latest, mingw64 gcc)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v7
+
+      # MSYS2's MinGW64 environment, not the POSIX-emulation MSYS one: `cc`/`make` must
+      # resolve to the native-Windows-target toolchain. See README.md's "macOS, Windows,
+      # WSL?" section and src/io/k3_portable_io.h for what O_DIRECT, pread,
+      # posix_memalign and getrusage become on this platform, and why -static and
+      # -lpsapi (which the Makefile's Windows branch adds automatically) are
+      # load-bearing rather than stylistic here.
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: mingw-w64-x86_64-gcc make
+
+      - name: Build (default flags, platform detection)
+        run: make
+
+      - name: make test
+        run: make test
+
+      - name: Assert the suite was not silently empty
+        run: |
+          make test 2>&1 | tee /tmp/t.log
+          grep -q "22 passed, 0 failed, 0 skipped" /tmp/t.log
+          grep -q "SCALE TEST PASSED"              /tmp/t.log
+          grep -q "VERDICT: ENGINE MATCHES THE REFERENCE EXACTLY" /tmp/t.log
+          grep -q "ALL WEIGHTLESS TESTS PASSED"    /tmp/t.log
+
+  # Windows sanitizer coverage needs a second MSYS2 environment: MinGW-w64's GCC package
+  # ships no libasan/libubsan runtime at all (confirmed directly -- `-lasan`/`-lubsan`
+  # fail to link, and no such file exists anywhere under /mingw64), unlike its Linux and
+  # macOS counterparts. MSYS2's separate Clang/LLVM environment carries a real one.
+  sanitizers-windows:
+    name: ASan + UBSan (windows-latest, clang)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANG64
+          update: true
+          install: mingw-w64-clang-x86_64-clang mingw-w64-clang-x86_64-compiler-rt make
+
+      # These are dynamic DLLs, not statically linked, and Windows resolves them by
+      # searching the executable's own directory before anything on PATH -- confirmed
+      # directly against a PATH already containing the exact directory these ship in.
+      # libc++.dll is not an obvious dependency of a C99 project; it is pulled in
+      # transitively because libclang_rt.asan_dynamic itself links against it.
+      - name: Build instrumented tests
+        run: |
+          make CC=clang CFLAGS="-O1 -g -std=gnu99 -Wall -Wextra -fsanitize=address,undefined -fno-omit-frame-pointer" \
+               LDFLAGS="-lm -fsanitize=address,undefined -lpsapi -lwinpthread" ARCH= \
+               bin/test_ops bin/test_cfg bin/test_cache bin/test_st bin/k3_model
+          cp /clang64/bin/libclang_rt.asan_dynamic-x86_64.dll /clang64/bin/libwinpthread-1.dll /clang64/bin/libc++.dll bin/
+      - name: Run under sanitizers
+        env:
+          ASAN_OPTIONS: detect_leaks=0:abort_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: |
+          ./bin/test_ops.exe tests/fixtures/ops
+          ./bin/test_cfg.exe fixture tests/fixtures/ref_k3.json
+          for f in no_layermap bad_layer_index bad_topk; do
+            ./bin/test_cfg.exe reject "tests/fixtures/cfg/$f.json"
+          done
+          ./bin/test_cache.exe tests/fixtures/cache
+          ./bin/test_st.exe tests/fixtures/st /tmp/idx.json \
+            plain.f32.2d plain.bf16.1d tricky.f16.1d packed.u8.2d scalar.f32 second.shard.f32
+          ./bin/k3_model.exe tests/fixtures
+
   # Warnings are defects here. The engine does arithmetic on `const void *` weight
   # pointers, where a missing -Wpointer-arith silently strides by one byte.
   strict-warnings:

@@ -1,11 +1,16 @@
 /* k3_cache.c - see k3_cache.h. */
 #define _POSIX_C_SOURCE 200809L
 
+#include "k3_portable_io.h"   /* first: sets _DARWIN_C_SOURCE before any libc header;
+                                * on Windows, supplies posix_memalign */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <sys/mman.h>
+#ifndef _WIN32
+#include <sys/mman.h>   /* MADV_HUGEPAGE; k3_portable_io.h no-ops it on Windows */
+#endif
 
 #include "k3_cache.h"
 
@@ -349,7 +354,7 @@ int k3_cache_init(K3Cache *c, const K3St *st, const K3Cfg *cfg, int64_t budget_b
 
 void k3_cache_free(K3Cache *c)
 {
-    free(c->arena); free(c->slot_of); free(c->key_of);
+    k3_aligned_free(c->arena); free(c->slot_of); free(c->key_of);
     free(c->used_at); free(c->pinned); free(c->ref); free(c->pad); free(c->hist);
     free(c->trace);
     memset(c, 0, sizeof *c);

@@ -49,7 +49,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <psapi.h>
+#else
 #include <sys/resource.h>
+#endif
 
 #include "k3.h"
 #include "k3_bind.h"
@@ -420,6 +426,13 @@ static void k3_preset_list(FILE *f)
  * Quote this value, not the plan. */
 static double peak_rss_bytes(void)
 {
+#ifdef _WIN32
+    /* PeakWorkingSetSize is Windows' peak-RSS equivalent, already in bytes -- no
+     * kilobyte scaling needed, unlike ru_maxrss on Linux. */
+    PROCESS_MEMORY_COUNTERS pmc;
+    if (!GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof pmc)) return 0.0;
+    return (double)pmc.PeakWorkingSetSize;
+#else
     struct rusage ru;
     if (getrusage(RUSAGE_SELF, &ru) != 0) return 0.0;
 #if defined(__APPLE__)
@@ -427,12 +440,23 @@ static double peak_rss_bytes(void)
 #else
     return (double)ru.ru_maxrss * 1024.0;   /* kilobytes */
 #endif
+#endif
 }
 
 /* MemAvailable, which is what the kernel thinks can actually be handed out, not
  * MemFree. Returns 0 if it cannot be read. */
 static double mem_available_bytes(void)
 {
+#ifdef _WIN32
+    /* ullAvailPhys is Windows' MemAvailable equivalent: physical memory that can
+     * actually be handed out (already accounts for the standby/modified page
+     * lists the way MemAvailable accounts for reclaimable cache), not the raw
+     * free count. */
+    MEMORYSTATUSEX ms;
+    ms.dwLength = sizeof ms;
+    if (!GlobalMemoryStatusEx(&ms)) return 0.0;
+    return (double)ms.ullAvailPhys;
+#else
     FILE *f = fopen("/proc/meminfo", "r");
     if (!f) return 0.0;
     char line[256];
@@ -441,6 +465,7 @@ static double mem_available_bytes(void)
         if (!strncmp(line, "MemAvailable:", 13)) { kb = atof(line + 13); break; }
     fclose(f);
     return kb * 1024.0;
+#endif
 }
 
 typedef struct {
@@ -697,6 +722,13 @@ int main(int argc, char **argv)
              * So below full residency, auto pins only while the whole process stays
              * comfortably clear of the RAM ceiling. */
             double memtotal = 0.0;
+#ifdef _WIN32
+            {
+                MEMORYSTATUSEX ms;
+                ms.dwLength = sizeof ms;
+                if (GlobalMemoryStatusEx(&ms)) memtotal = (double)ms.ullTotalPhys;
+            }
+#else
             FILE *mf = fopen("/proc/meminfo", "r");
             if (mf) {
                 char ln[256];
@@ -704,6 +736,7 @@ int main(int argc, char **argv)
                     if (!strncmp(ln, "MemTotal:", 9)) { memtotal = atof(ln + 9) * 1024.0; break; }
                 fclose(mf);
             }
+#endif
             const double rss_ceiling = memtotal > 0.0 ? 0.55 * memtotal / 1e9
                                                       : usable;   /* no /proc: keep old cap */
             double cap = rss_ceiling - reserve - cache_min;

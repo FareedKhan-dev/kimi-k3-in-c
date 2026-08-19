@@ -5,6 +5,36 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Windows support**: builds natively via MSYS2's MinGW-w64 GCC, no WSL required.
+  `make`, `make test`, and `make test-all` pass every gate unmodified, including the
+  full-model oracle and tokenizer parity (45/45) against real Kimi K3 weights.
+  `src/io/k3_portable_io.h` gained a Windows branch alongside the existing Darwin one,
+  porting `O_DIRECT` (via `FILE_FLAG_NO_BUFFERING`, intercepted at `open()` since
+  Windows -- unlike Darwin -- cannot add it to an already-open handle), `pread` (via
+  `ReadFile`'s `OVERLAPPED` offset fields, chosen specifically because it does not
+  share mutable file-pointer state across threads the way `SetFilePointerEx` +
+  `ReadFile` would), `posix_memalign` (via `_aligned_malloc`), and `getrusage`/
+  `MemAvailable` (via `GetProcessMemoryInfo`/`GlobalMemoryStatusEx`). `make asan`/
+  `make ubsan` switch to Clang on Windows (MinGW-w64's GCC package ships no sanitizer
+  runtime at all, confirmed directly rather than assumed).
+
+### Fixed
+
+- **Heap corruption on Windows** (`STATUS_HEAP_CORRUPTION`) in the trunk and expert-
+  cache arena allocators: `_aligned_malloc`, which backs the Windows `posix_memalign`
+  shim, must be freed with `_aligned_free`, not plain `free`. POSIX's `posix_memalign`
+  carries no such restriction, so this compiled cleanly and only crashed once the
+  corrupted allocator metadata was actually used, well after the allocation itself.
+  Three call sites needed the fix: `k3_cache.c`'s cache arena, and `k3_trunk.c`'s
+  trunk arena and per-layer pinned buffers.
+- **`SHARD_DIR`/`TOK_FILES` unquoted in the Makefile**: a path containing a space
+  (routine on Windows, e.g. an "AI LOCAL MODELS" folder) silently split into extra
+  argv entries instead of failing loudly, and `test_expert`/`test_real_layer`/
+  `test_tok`/`test_cfg` read whichever truncated token happened to resolve to a path,
+  rather than refusing outright.
+
 ## [1.0.0] - 2026-08-07
 
 Verified end to end on the full released checkpoint, and made substantially faster, with
