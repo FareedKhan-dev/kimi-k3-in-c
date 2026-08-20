@@ -359,6 +359,9 @@ static void usage(FILE *f)
 "\n"
 "generation:\n"
 "  --gen N               tokens to generate (default 8)\n"
+"  --stop-id N           halt after emitting token id N (repeatable, up to 8). The\n"
+"                        stop id is kept in the sequence, so --save-state and a later\n"
+"                        --load-state continue from what was actually produced\n"
 "  --incremental         carry KV cache and recurrent state between tokens\n"
 "  --save-state PATH     write the carried state after the run, so the next turn of a\n"
 "                        conversation resumes instead of re-reading the whole prompt\n"
@@ -675,6 +678,12 @@ int main(int argc, char **argv)
     const char *prompt_text = NULL, *prompt_file = NULL, *tok_dir = NULL;
     const char *cfg_path = NULL;
     int gen = 8, want_layers = -1;
+    /* --stop-id, repeatable. Generation halts AFTER emitting a listed id, so the state
+     * written by --save-state still contains it and a later --load-state continues the
+     * sequence the model actually produced. Without this the engine always runs to
+     * --gen, which for a chat-tuned checkpoint means paying seconds per token for text
+     * past the end-of-message marker that a caller will only throw away. */
+    int stop_id[8]; int n_stop = 0, hit_stop = 0;
     double cache_gb = 64.0, trunk_gb = 16.0;
     int budget_auto = 0;
     int spec_n = 0;
@@ -691,6 +700,14 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--tok") && i + 1 < argc) tok_dir = argv[++i];
         else if (!strcmp(argv[i], "--config") && i + 1 < argc) cfg_path = argv[++i];
         else if (!strcmp(argv[i], "--gen") && i + 1 < argc) gen = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--stop-id") && i + 1 < argc) {
+            if (n_stop >= (int)(sizeof stop_id / sizeof stop_id[0])) {
+                fprintf(stderr, "--stop-id given more than %d times\n",
+                        (int)(sizeof stop_id / sizeof stop_id[0]));
+                return 2;
+            }
+            stop_id[n_stop++] = atoi(argv[++i]);
+        }
         else if (!strcmp(argv[i], "--cache-gb") && i + 1 < argc) cache_gb = atof(argv[++i]);
         else if (!strcmp(argv[i], "--layers") && i + 1 < argc) want_layers = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--out") && i + 1 < argc) outp = argv[++i];
@@ -1485,6 +1502,15 @@ int main(int argc, char **argv)
         for (int i = 0; i < emitn && nout < gen && T < Tmax; i++) {
             seq[T++] = emit[i];
             outtok[nout++] = emit[i];
+            /* Checked here rather than per step so a speculative sweep that verifies
+             * past a stop id is truncated at the stop, exactly like serial decode. */
+            for (int s = 0; s < n_stop; s++)
+                if (emit[i] == stop_id[s]) { hit_stop = 1; break; }
+            if (hit_stop) break;
+        }
+        if (hit_stop) {
+            printf("stop id reached after %d tokens\n", nout);
+            break;
         }
         if (T >= Tmax) break;
     }
