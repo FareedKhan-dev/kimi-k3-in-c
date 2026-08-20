@@ -1330,7 +1330,12 @@ int main(int argc, char **argv)
      * figure against a single step would misstate the I/O share. */
     double expert_s_total = 0.0, expert_gb_total = 0.0;
     uint64_t expert_reqs_total = 0, expert_evict_total = 0, expert_bytes_total = 0;
-    for (int g = 0; nout < gen; g++) {
+    /* `nout < gen` drives generation; the `g == 0` disjunct additionally runs the
+     * incremental prefill once even when --gen 0, so the prompt's KV and recurrent
+     * state are computed and can be saved with ZERO generated tokens. That is what
+     * lets --gen 0 --save-state warm a reusable prefix (e.g. a chat system prompt)
+     * whose recurrent state is exact rather than one generated token past the end. */
+    for (int g = 0; nout < gen || (incremental && g == 0); g++) {
         k3_cache_reset_stats(&cache);
         const double ts = now_s();
         int frc;
@@ -1519,7 +1524,11 @@ int main(int argc, char **argv)
     }
     free(spec_snap);
     printf("--------------------------------------------------------------------\n");
-    printf("%d tokens in %.1f s, %.2f s/token average\n", nout, t_total, t_total / nout);
+    if (nout > 0)
+        printf("%d tokens in %.1f s, %.2f s/token average\n",
+               nout, t_total, t_total / nout);
+    else
+        printf("prefill only: %d positions cached, 0 tokens generated\n", w.cached);
 
     /* Decoded text, when a tokenizer is loaded. Printed as a distinct block rather than
      * streamed per token: a partially-decoded multi-byte sequence is not valid UTF-8, so
