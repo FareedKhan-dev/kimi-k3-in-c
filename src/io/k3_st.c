@@ -483,7 +483,8 @@ int64_t k3_st_read_aligned(const K3St *s, int shard, int64_t off, int64_t nbytes
 
     int64_t got = 0;
     while (got < len) {
-        ssize_t r = pread(dfd, (char *)buf + got, (size_t)(len - got), (off_t)(lo + got));
+        const int64_t req = (len - got < K3_PREAD_MAX) ? (len - got) : K3_PREAD_MAX;
+        ssize_t r = pread(dfd, (char *)buf + got, (size_t)req, (off_t)(lo + got));
         if (r <= 0) {
             /* The final window of a shard can extend past EOF, which is a short read
              * rather than an error. Accept it once the payload itself is covered. */
@@ -500,8 +501,10 @@ int64_t k3_st_read(const K3St *s, const K3Tensor *t, void *buf)
      * call the streaming tier will make per expert: a 17.55 MB contiguous span. */
     int64_t got = 0;
     while (got < t->nbytes) {
+        const int64_t remain = t->nbytes - got;
+        const int64_t req = remain < K3_PREAD_MAX ? remain : K3_PREAD_MAX;
         ssize_t r = pread(s->fd[t->shard], (char *)buf + got,
-                          (size_t)(t->nbytes - got), (off_t)(t->off + got));
+                          (size_t)req, (off_t)(t->off + got));
         if (r <= 0) {
             fprintf(stderr, "k3_st: short read on %s at +%lld\n", t->name, (long long)got);
             return got;
