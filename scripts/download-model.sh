@@ -13,6 +13,14 @@
 
 set -euo pipefail
 
+# `stat` and `find -printf` are spelled differently on BSD/macOS than on GNU/Linux.
+# Resolve the stat flavour once here rather than shelling out per file.
+case "$(uname -s)" in
+    Darwin) STAT_FMT='-f%z' ;;
+    *)      STAT_FMT='-c%s' ;;
+esac
+filesize() { stat $STAT_FMT "$1"; }
+
 DEST="${1:?usage: download-model.sh <dest_dir>}"
 REPO="moonshotai/Kimi-K3"
 
@@ -60,14 +68,22 @@ hf cache verify --help >/dev/null 2>&1 || {
 # recommended installs above put the library in an isolated environment and expose only
 # the `hf` executable, so importing it from the system interpreter fails on exactly the
 # setups this script just told the user to create.
-# NOTE: awk must read to EOF here. Exiting on the first match closes the pipe, `hf` takes
-# SIGPIPE, and under `set -o pipefail` that kills the script with 141 before it prints
-# anything at all.
+#
+# The `hf models info` JSON is parsed with the stdlib `json` module, not a text scan --
+# huggingface_hub 1.28 prints it as one compact line rather than the pretty-printed,
+# one-key-per-line form an earlier `tr | awk '/^sha:/'` scan assumed, and that scan
+# silently found nothing against compact output. `json` needs no import of
+# huggingface_hub itself, so it does not hit the isolated-environment problem above.
+# NOTE: json.load reads its input to EOF, so `hf` still runs to completion rather than
+# taking SIGPIPE from an early-exiting consumer under `set -o pipefail`.
 REVISION="${K3_REVISION:-}"
 if [ -z "$REVISION" ]; then
     REVISION="$(hf models info "$REPO" 2>/dev/null \
-                | tr -d ' ",' \
-                | awk -F: '!v && /^sha:/ {v = $2} END {print v}')"
+                | python3 -c 'import json, sys
+try:
+    print(json.load(sys.stdin).get("sha", ""))
+except Exception:
+    print("")')"
 fi
 case "$REVISION" in
     ????????????????????????????????????????) ;;   # 40 hex characters
@@ -110,8 +126,14 @@ echo "verifying…"
 # find, not `ls | wc -l`: under `set -euo pipefail` a glob that matches nothing makes
 # ls exit non-zero and the script dies HERE, so the "download is incomplete" message
 # below -- the entire point of this verification block -- would never be reached.
+#
+# Summed with a loop rather than `find -printf '%s\n'`: -printf is a GNU find
+# extension that BSD/macOS find does not support. -print0 is POSIX-portable.
 N=$(find "$DEST" -maxdepth 1 -name '*.safetensors' | wc -l)
-B=$(find "$DEST" -maxdepth 1 -name '*.safetensors' -printf '%s\n' | awk '{s+=$1} END{print s+0}')
+B=0
+while IFS= read -r -d '' f; do
+    B=$((B + $(filesize "$f")))
+done < <(find "$DEST" -maxdepth 1 -name '*.safetensors' -print0)
 
 printf '  shards : %s (expect %s)\n' "$N" "$EXPECT_SHARDS"
 printf '  bytes  : %s (expect %s)\n' "$B" "$EXPECT_BYTES"
@@ -135,7 +157,7 @@ if [ -f "$SIZES" ]; then
     bad=0
     while read -r name want; do
         [ -n "$name" ] || continue
-        got=$(stat -c%s "$DEST/$name" 2>/dev/null || echo 0)
+        got=$(filesize "$DEST/$name" 2>/dev/null || echo 0)
         if [ "$got" != "$want" ]; then
             printf '  BAD  %s: %s bytes, expected %s\n' "$name" "$got" "$want"
             bad=$((bad + 1))
@@ -155,7 +177,7 @@ fi
 # commit resolved earlier. It re-reads all 1.56 TB, so it is not free -- on a machine
 # without SHA-NI it can take longer than the download did.
 echo
-echo "verifying checksums against Hub metadata for $REVISION…"
+echo "verifying checksums against Hub metadata for ${REVISION}…"
 echo "  (re-reads the full 1.56 TB; set K3_SKIP_CHECKSUM=1 to skip)"
 if [ "${K3_SKIP_CHECKSUM:-0}" = "1" ]; then
     echo "  SKIPPED by K3_SKIP_CHECKSUM=1; sizes were still checked above."
