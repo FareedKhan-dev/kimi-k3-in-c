@@ -404,6 +404,11 @@ printf 'La capitale de la France est' > /tmp/p.txt
 | `--trunk` | `DIR` | off | the packed trunk directory from step 5. **This is what enables streaming.** Without it the trunk loads fully resident, around 113.5 GB |
 | `--trunk-gb` | `X` | 16 | budget for pinned layers plus the streaming ring |
 | `--cache-gb` | `X` | 64 | budget for the routed-expert LRU cache |
+| `--ultra-low-memory` | none | off | stream exact embedding rows and lm_head chunks; full recompute also reuses one recurrent-state slot. Requires `--trunk` |
+
+The `ultra` preset selects `--ultra-low-memory` with a 2.5 GB trunk ring and a
+0.31 GB expert cache. It is a proof-of-life path for 8 GB-class machines, not an
+interactive-speed preset; model precision, Top-K routing and all 93 layers are unchanged.
 
 `--preset` and the two `-gb` flags set the same two numbers, so a preset is just a
 shorthand. Order matters if you mix them: a later flag wins, so
@@ -459,6 +464,10 @@ Scripts can rely on these.
 ### Worked examples
 
 ```bash
+# Full-model, one-token proof of life on an 8 GB-class ARM64 machine.
+./bin/k3 ~/k3model --trunk ~/k3trunk --preset ultra \
+         --tok ~/k3model --prompt "The capital of France is" --gen 1
+
 # Smallest possible run, the 8 GB floor.
 ./bin/k3 ~/k3model --trunk ~/k3trunk --preset laptop \
          --tok ~/k3model --prompt "Hello! My name is" --gen 16 --incremental
@@ -501,11 +510,12 @@ systemd-run --scope --user -q -p MemoryMax=8G -p MemorySwapMax=0 \
 ```console
 $ ./bin/k3 --list-presets
 presets (trunk / expert-cache, in GB):
-  laptop          3.0 / 1.0     8.2 GB peak RSS. The floor. Runs, slowly.
-  desktop        16.0 / 10.0    31.9 GB peak RSS.
-  workstation    60.0 / 30.0    95.5 GB peak RSS; the expert cache starts to matter here.
-  server        110.0 / 13.0    ~128 GB peak RSS; 90 of 93 trunk layers pinned. Fastest.
-  max           110.0 / 109.0   ~224 GB peak RSS; trunk pinned and a large expert cache.
+  ultra          2.50 / 0.31    ~3 GB planned: streamed model tables, one state slot. Slow.
+  laptop         3.00 / 1.00    8.2 GB peak RSS. The ordinary-path floor.
+  desktop       16.00 / 10.00   31.9 GB peak RSS.
+  workstation   60.00 / 30.00   95.5 GB peak RSS; the expert cache starts to matter here.
+  server       110.00 / 13.00   ~128 GB peak RSS; 90 of 93 trunk layers pinned. Fastest.
+  max          110.00 / 109.00  ~224 GB peak RSS; trunk pinned and a large expert cache.
 
 All presets stream the trunk, so they need --trunk <packed_dir>.
 Run scripts/k3-doctor.sh to see which one this machine fits.

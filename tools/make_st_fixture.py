@@ -82,11 +82,26 @@ def main():
 
     u8 = rng.integers(0, 256, size=(7, 32), dtype=np.uint8)
 
+    # Small, deliberately non-vector-width model matrices for the streamed
+    # embedding/lm_head parity gate. Seven columns exercises the scalar tail after the
+    # four-accumulator loop; eleven rows makes chunk/order mistakes visible.
+    stream_rng = np.random.default_rng(29)
+    stream_embed = bf16_bits(
+        (stream_rng.standard_normal((11, 7)) * 0.25).astype(np.float32)
+    )
+    stream_head = bf16_bits(
+        (stream_rng.standard_normal((11, 7)) * 0.5).astype(np.float32)
+    )
+
     A = {
         "plain.f32.2d":        ("F32",  f32, (16, 16)),
         "plain.bf16.1d":       ("BF16", bf16, (128,)),
         "tricky.f16.1d":       ("F16",  f16, (64,)),
         "packed.u8.2d":        ("U8",   u8, (7, 32)),
+        "language_model.model.embed_tokens.weight":
+                               ("BF16", stream_embed, (11, 7)),
+        "language_model.lm_head.weight":
+                               ("BF16", stream_head, (11, 7)),
         # A scalar has shape []. numel must be 1, not 0, or the size check rejects it.
         "scalar.f32":          ("F32",  np.float32([3.5]), ()),
         # A zero-element tensor is legal and spans zero bytes. A reader that treats

@@ -1,0 +1,3 @@
+repo=moonshotai/Kimi-K3
+revision=9f62e4e9fffbd0a83ddd60e1c209d828994b3569
+verified_at=2026-08-08T21:02:46+08:00

@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "k3_bind.h"
 
@@ -447,10 +448,12 @@ int k3_bind_layer_mem(const K3Cfg *c, int L, K3LayerBind *b,
 /* embed is gathered a row at a time rather than multiplied, so k3_run widens the row it
  * needs. lm_head goes through k3_mmw. Both are 2.35 GB as bf16 and 4.70 GB widened,
  * which is why neither is widened here. */
-static void plan_model(Plan *p, const K3Cfg *c, int want_lm_head, K3ModelBind *m)
+static void plan_model(Plan *p, const K3Cfg *c, int want_embed, int want_lm_head,
+                       K3ModelBind *m)
 {
     const int64_t H = c->hidden;
-    reqn(p, &m->embed, (int64_t)c->vocab * H, PRE "embed_tokens.weight");
+    if (want_embed)
+        reqn(p, &m->embed, (int64_t)c->vocab * H, PRE "embed_tokens.weight");
     reqw(p, &m->norm,  H, -1, PRE "norm.weight");
     reqw(p, &m->out_res_norm, H, -1, PRE "output_attn_res_norm.weight");
     reqw(p, &m->out_res_proj, H, -1, PRE "output_attn_res_proj.weight");
@@ -458,12 +461,13 @@ static void plan_model(Plan *p, const K3Cfg *c, int want_lm_head, K3ModelBind *m
         reqn(p, &m->lm_head, (int64_t)c->vocab * H, "language_model.lm_head.weight");
 }
 
-int k3_bind_model(const K3St *s, const K3Cfg *c, int want_lm_head, K3ModelBind *m)
+int k3_bind_model_parts(const K3St *s, const K3Cfg *c,
+                        int want_embed, int want_lm_head, K3ModelBind *m)
 {
     memset(m, 0, sizeof *m);
     Plan p; memset(&p, 0, sizeof p);
     p.narrow_ok = 1;
-    plan_model(&p, c, want_lm_head, m);
+    plan_model(&p, c, want_embed, want_lm_head, m);
 
     int64_t need = plan_resolve(&p, s);
     if (need < 0) return -1;
@@ -473,7 +477,7 @@ int k3_bind_model(const K3St *s, const K3Cfg *c, int want_lm_head, K3ModelBind *
         memset(m, 0, sizeof *m);
         memset(&p, 0, sizeof p);
         p.narrow_ok = 0;
-        plan_model(&p, c, want_lm_head, m);
+        plan_model(&p, c, want_embed, want_lm_head, m);
         need = plan_resolve(&p, s);
         if (need < 0) return -1;
     }
@@ -491,8 +495,141 @@ int k3_bind_model(const K3St *s, const K3Cfg *c, int want_lm_head, K3ModelBind *
     return 0;
 }
 
+int k3_bind_model(const K3St *s, const K3Cfg *c, int want_lm_head, K3ModelBind *m)
+{
+    return k3_bind_model_parts(s, c, 1, want_lm_head, m);
+}
+
 void k3_bind_model_free(K3ModelBind *m)
 {
     free(m->blob);
     memset(m, 0, sizeof *m);
+}
+
+/* ------------------------------------------------------ streamed model matrices */
+
+static int model_matrix(const K3St *s, const char *name, int rows, int cols,
+                        const K3Tensor **out, int *wdt)
+{
+    const K3Tensor *t = k3_st_find(s, name);
+    if (!t) {
+        fprintf(stderr, "k3_model_stream: missing tensor %s\n", name);
+        return -1;
+    }
+    if (t->ndim != 2 || t->shape[0] != rows || t->shape[1] != cols) {
+        fprintf(stderr,
+                "k3_model_stream: %s has shape [%lld,%lld] rank %d; expected [%d,%d]\n",
+                name, (long long)(t->ndim > 0 ? t->shape[0] : -1),
+                (long long)(t->ndim > 1 ? t->shape[1] : -1), t->ndim, rows, cols);
+        return -1;
+    }
+    if (t->dtype == K3_DT_BF16) *wdt = K3_WBF16;
+    else if (t->dtype == K3_DT_F32) *wdt = K3_WF32;
+    else {
+        fprintf(stderr, "k3_model_stream: %s must be BF16 or F32, got dtype %d\n",
+                name, (int)t->dtype);
+        return -1;
+    }
+    *out = t;
+    return 0;
+}
+
+static double model_now_s(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return t.tv_sec + t.tv_nsec * 1e-9;
+}
+
+int k3_model_stream_init(K3ModelStream *m, const K3St *s, const K3Cfg *c)
+{
+    memset(m, 0, sizeof *m);
+    m->st = s;
+    m->hidden = c->hidden;
+    m->vocab = c->vocab;
+    if (model_matrix(s, PRE "embed_tokens.weight", c->vocab, c->hidden,
+                     &m->embed, &m->embed_wdt) != 0 ||
+        model_matrix(s, "language_model.lm_head.weight", c->vocab, c->hidden,
+                     &m->lm_head, &m->lm_head_wdt) != 0)
+        return -1;
+
+    m->bufcap = K3_MODEL_STREAM_CHUNK + 2u * K3_ST_ALIGN;
+    if (posix_memalign((void **)&m->buf, K3_ST_ALIGN, m->bufcap) != 0) {
+        fprintf(stderr, "k3_model_stream: cannot allocate %zu-byte aligned I/O buffer\n",
+                m->bufcap);
+        memset(m, 0, sizeof *m);
+        return -1;
+    }
+    return 0;
+}
+
+void k3_model_stream_free(K3ModelStream *m)
+{
+    free(m->buf);
+    memset(m, 0, sizeof *m);
+}
+
+static int model_read_rows(K3ModelStream *m, const K3Tensor *t, int first, int n,
+                           const void **rows, uint64_t *counter)
+{
+    const int esz = k3_st_elemsize(t->dtype);
+    const int64_t row_bytes = (int64_t)m->hidden * esz;
+    const int64_t nbytes = (int64_t)n * row_bytes;
+    int64_t payload = 0;
+    if (first < 0 || n <= 0 || first > m->vocab - n ||
+        nbytes > (int64_t)K3_MODEL_STREAM_CHUNK)
+        return -1;
+    const double t0 = model_now_s();
+    const int64_t got = k3_st_read_aligned(m->st, t->shard,
+                            t->off + (int64_t)first * row_bytes, nbytes,
+                            m->buf, (int64_t)m->bufcap, &payload);
+    m->read_seconds += model_now_s() - t0;
+    if (got != nbytes) {
+        fprintf(stderr,
+                "k3_model_stream: short read of %s rows %d..%d (%lld of %lld bytes)\n",
+                t->name, first, first + n, (long long)got, (long long)nbytes);
+        return -1;
+    }
+    unsigned char *src = m->buf + payload;
+    /* Safetensors guarantees byte ranges, not C type alignment. A BF16 tensor may
+     * legally follow an odd-sized U8 tensor, making its payload address odd even though
+     * the O_DIRECT destination itself is page aligned. Typed uint16_t/float loads from
+     * that address are undefined on strict-alignment targets. Compact only in that rare
+     * case; memmove is overlap-safe and the existing buffer has enough room. */
+    if ((uintptr_t)src % (uintptr_t)esz != 0) {
+        memmove(m->buf, src, (size_t)nbytes);
+        src = m->buf;
+    }
+    *rows = src;
+    *counter += (uint64_t)got;
+    return 0;
+}
+
+int k3_model_stream_embed_row(K3ModelStream *m, float *dst, int64_t row)
+{
+    const void *src = NULL;
+    if (row < 0 || row >= m->vocab ||
+        model_read_rows(m, m->embed, (int)row, 1, &src, &m->embed_bytes_read) != 0)
+        return -1;
+    k3_embed_row(dst, src, m->embed_wdt, 0, m->hidden);
+    return 0;
+}
+
+int k3_model_stream_project(K3ModelStream *m, float *logits, const float *x)
+{
+    const int esz = k3_st_elemsize(m->lm_head->dtype);
+    const int64_t row_bytes = (int64_t)m->hidden * esz;
+    const int rows_per_chunk = (int)(K3_MODEL_STREAM_CHUNK / row_bytes);
+    if (rows_per_chunk < 1) return -1;
+
+    for (int first = 0; first < m->vocab; first += rows_per_chunk) {
+        const int n = (m->vocab - first < rows_per_chunk)
+                    ? m->vocab - first : rows_per_chunk;
+        const void *rows = NULL;
+        if (model_read_rows(m, m->lm_head, first, n, &rows,
+                            &m->lm_head_bytes_read) != 0)
+            return -1;
+        k3_mmw(logits + first, x, rows, m->lm_head_wdt, m->hidden, n);
+    }
+    return 0;
 }
