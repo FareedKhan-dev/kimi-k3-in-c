@@ -571,11 +571,32 @@ int main(void)
     c.n_full_attn  = 1;
     c.full_attn    = fa;
 
-    /* Create a temp directory for the fixture. */
-    char tmpdir[] = "/tmp/k3_test_trunk_XXXXXX";
+    /* Create a temp directory for the fixture. mkdtemp() and /tmp are both POSIX
+     * assumptions: MinGW's native runtime provides neither the function nor the
+     * path, since a compiled .exe sees literal Windows paths, not the MSYS2 shell's
+     * translated view of them. */
+    char tmpdir[512];
+#if defined(_WIN32)
+    {
+        char base[MAX_PATH];
+        DWORD blen = GetTempPathA(sizeof base, base);
+        if (blen == 0 || blen >= sizeof base) {
+            fprintf(stderr, "GetTempPathA failed\n"); return 2;
+        }
+        int made = 0;
+        for (unsigned attempt = 0; attempt < 1000; attempt++) {
+            snprintf(tmpdir, sizeof tmpdir, "%sk3_test_trunk_%lu_%u",
+                     base, (unsigned long)GetCurrentProcessId(), attempt);
+            if (CreateDirectoryA(tmpdir, NULL)) { made = 1; break; }
+        }
+        if (!made) { fprintf(stderr, "CreateDirectoryA failed\n"); return 2; }
+    }
+#else
+    snprintf(tmpdir, sizeof tmpdir, "/tmp/k3_test_trunk_XXXXXX");
     if (!mkdtemp(tmpdir)) {
         perror("mkdtemp"); return 2;
     }
+#endif
 
     if (gen_fixture(tmpdir) != 0) {
         fprintf(stderr, "FAILED to generate fixture in %s\n", tmpdir);
