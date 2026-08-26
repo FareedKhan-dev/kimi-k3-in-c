@@ -43,6 +43,29 @@ magnitude is not replicated. All twelve rows and the caveats are in
 [data/trunk-cache-split.tsv](data/trunk-cache-split.tsv), and
 `benchmarks/split-sweep.sh` re-runs the experiment with repetitions.
 
+### If the trunk and the checkpoint are on separate physical devices
+
+The asymmetry above assumes trunk and expert reads compete for one drive's bandwidth.
+On a machine where the packed trunk lives on one device and the checkpoint (routed
+experts) lives on another, that coupling does not hold: trunk reads then run on an
+otherwise idle device and overlap compute almost for free, so pinning more trunk layers
+buys little once the ring is already overlapping.
+
+The threshold that actually matters on this layout is the one the engine reports at
+startup, the point where a second ring slot becomes affordable:
+
+```
+ring held at 1 slot: a second slot needs X.XX GB and the trunk budget is Y.YY GB,
+so reads are NOT overlapped with compute. Raise --trunk-gb above X.XX GB to enable it.
+```
+
+Below that figure, trunk I/O sits on the critical path and costs measurably more; above
+it, the curve flattens and further pinning stops paying for itself. Set `--trunk-gb`
+just above that reported figure and give any remaining budget to `--cache-gb` instead,
+since on split storage the expert device is the sole bottleneck. Reported and measured
+by a user running the packed trunk on NVMe and the checkpoint on a separate SATA drive;
+see [PERFORMANCE.md](PERFORMANCE.md) for the full writeup.
+
 ## Why the expert cache is so weak
 
 This is the model's design, not a shortcoming of the implementation.
