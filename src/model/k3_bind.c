@@ -1,6 +1,9 @@
 /* k3_bind.c - see k3_bind.h. */
 #define _POSIX_C_SOURCE 200809L
 
+#include "k3_portable_io.h"   /* first: sets _DARWIN_C_SOURCE before any libc header;
+                                * on Windows, supplies posix_memalign */
+
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -565,7 +568,7 @@ int k3_model_stream_init(K3ModelStream *m, const K3St *s, const K3Cfg *c)
 
 void k3_model_stream_free(K3ModelStream *m)
 {
-    free(m->buf);
+    k3_aligned_free(m->buf);
     memset(m, 0, sizeof *m);
 }
 

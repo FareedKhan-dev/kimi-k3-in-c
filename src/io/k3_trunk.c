@@ -10,8 +10,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#ifndef _WIN32
 #include <unistd.h>
-#include <sys/mman.h>
+#include <sys/mman.h>   /* MADV_HUGEPAGE; k3_portable_io.h no-ops both on Windows */
+#endif
 #include <pthread.h>
 
 #include "json.h"
@@ -343,8 +345,8 @@ void k3_trunk_close(K3Trunk *tr)
         free(io);
     }
     if (tr->fd >= 0) close(tr->fd);
-    if (tr->pin) { for (int i = 0; i < tr->npin; i++) free(tr->pin[i]); free(tr->pin); }
-    free(tr->arena); free(tr->layer_of); free(tr->slot_of);
+    if (tr->pin) { for (int i = 0; i < tr->npin; i++) k3_aligned_free(tr->pin[i]); free(tr->pin); }
+    k3_aligned_free(tr->arena); free(tr->layer_of); free(tr->slot_of);
     if (tr->lay) { for (int i = 0; i < tr->n_layers; i++) free(tr->lay[i].t); free(tr->lay); }
     free(tr->json_arena);   /* every K3TrunkTensor.name points into this */
     memset(tr, 0, sizeof *tr);
