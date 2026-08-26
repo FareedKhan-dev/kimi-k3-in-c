@@ -1245,10 +1245,14 @@ static void k3_e8m0_init(void)
  * within one: it factors out of the inner sum and is applied once per group instead of
  * once per element. At group 32 each group is exactly 16 packed bytes.
  *
- * PRECONDITIONS, none of these are checked, and violating them corrupts memory:
+ * PRECONDITIONS:
  *   - group <= 64. The expanded group goes into a fixed wf[64] stack buffer.
+ *     Checked below; violating it aborts with a FATAL message rather than
+ *     overflowing the buffer.
  *   - `in` is even. The packed row stride is in/2 bytes, two elements per byte.
+ *     Checked below for the same reason.
  *   - `packed` is rows x (in/2) bytes; `scales` is rows x ceil(in/group) bytes.
+ *     Not checked; the caller owns these buffer sizes.
  *   - A scale byte of 255 is NaN by the OCP MX spec and zeroes its whole group.
  *
  * ACCURACY CONTRACT. This kernel is deliberately NOT bit-identical to
@@ -1270,6 +1274,26 @@ static void k3_e8m0_init(void)
 void k3_matmul_mxfp4(float *y, const float *x, const unsigned char *packed,
                      const unsigned char *scales, int in, int rows, int group)
 {
+    if (in & 1) {
+        fprintf(stderr,
+                "k3: FATAL, k3_matmul_mxfp4 called with in=%d, which is odd.\n"
+                "    Packed rows are in/2 bytes, two elements per byte; an odd `in`\n"
+                "    truncates that stride below what the trailing group's odd\n"
+                "    remainder reads, a heap read past the caller's buffer instead\n"
+                "    of failing loudly.\n",
+                in);
+        abort();
+    }
+    if (group > 64) {
+        fprintf(stderr,
+                "k3: FATAL, k3_matmul_mxfp4 called with group=%d, which exceeds 64.\n"
+                "    Each group is expanded into a fixed wf[64] stack buffer before\n"
+                "    the dot product; a larger group overflows it instead of failing\n"
+                "    loudly.\n",
+                group);
+        abort();
+    }
+
     const int pcols = in / 2;                     /* two elements per byte */
     const int ngrp  = (in + group - 1) / group;
     const int gbyte = group / 2;
