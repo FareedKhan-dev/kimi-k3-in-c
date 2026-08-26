@@ -5,7 +5,7 @@
  *   When the ring has only one slot, starting the async reader thread is a
  *   correctness bug: k3_trunk_prefetch claims the ring slot for the incoming
  *   layer, the reader preads layer L+1 straight over layer L's bytes while the
- *   caller is still computing on them, and nothing detects it — the run
+ *   caller is still computing on them, and nothing detects it -- the run
  *   completes and emits fluent, wrong tokens.
  *
  *   The one-slot guard in k3_trunk_open prevents the reader thread from starting
@@ -146,7 +146,7 @@ static int gen_layer_run(unsigned char *dst, int layer, int is_dense, int is_mla
         { int nb = P * KDA_HEAD_DIM * 2; fill_marker(p, layer, (*ti)++, nb); p += nb; }
         /* b_proj */
         { int nb = KDA_HEADS * H * 2; fill_marker(p, layer, (*ti)++, nb); p += nb; }
-        /* A_log — 4 F32 elements, 16 bytes */
+        /* A_log -- 4 F32 elements, 16 bytes */
         { int nb = KDA_HEAD_DIM * 4; fill_marker(p, layer, (*ti)++, nb); p += nb; }
         /* dt_bias */
         { int nb = P * 4; fill_marker(p, layer, (*ti)++, nb); p += nb; }
@@ -367,7 +367,7 @@ static int test_one_slot(const char *dir, const K3Cfg *c)
     int dt_ok_0 = check_marker((const unsigned char *)b0.kda.dt_bias, 0, dt_ti, 32);
     ck(dt_ok_0, "one-slot: bind L0 content correct", "");
 
-    /* Prefetch L1 with one slot — must be a no-op */
+    /* Prefetch L1 with one slot -- must be a no-op */
     k3_trunk_prefetch(&tr, 1);
     /* Prefetch was a no-op: misses should still be 1 (only the sync read of L0) */
     ck(tr.misses == 1, "one-slot: prefetch L1 no-op (misses unchanged)", "");
@@ -376,12 +376,12 @@ static int test_one_slot(const char *dir, const K3Cfg *c)
     int dt_ok_0b = check_marker((const unsigned char *)b0.kda.dt_bias, 0, dt_ti, 32);
     ck(dt_ok_0b, "one-slot: L0 survives prefetch L1", "");
 
-    /* Now bind L1 — this overwrites slot 0 legitimately */
+    /* Now bind L1 -- this overwrites slot 0 legitimately */
     K3LayerBind b1; memset(&b1, 0, sizeof b1);
     if (k3_trunk_bind(&tr, c, 1, &b1) != 0) { k3_trunk_close(&tr); return 1; }
     ck(tr.hits == 0 && tr.misses == 2, "after bind L1: misses=2, hits=0", "");
 
-    /* rebind L1 — should be a hit now */
+    /* rebind L1 -- should be a hit now */
     int dt_ok_1 = check_marker((const unsigned char *)b1.kda.dt_bias, 1, dt_ti, 32);
     ck(dt_ok_1, "one-slot: bind L1 content correct", "");
     if (k3_trunk_bind(&tr, c, 1, &b1) != 0) { k3_trunk_close(&tr); return 1; }
@@ -411,10 +411,10 @@ static int test_two_slot(const char *dir, const K3Cfg *c)
     int dt_ok_0 = check_marker((const unsigned char *)b0.kda.dt_bias, 0, dt_ti, 32);
     ck(dt_ok_0, "two-slot: bind L0 content correct", "");
 
-    /* Prefetch L1 — starts async read into slot 1 */
+    /* Prefetch L1 -- starts async read into slot 1 */
     k3_trunk_prefetch(&tr, 1);
 
-    /* Bind L1 — blocks until reader finishes, publishes slot 1.
+    /* Bind L1 -- blocks until reader finishes, publishes slot 1.
      * The miss was recorded inside trunk_io_wait when it published the slot;
      * k3_trunk_bind itself records a hit only on the synchronous lookup path. */
     K3LayerBind b1; memset(&b1, 0, sizeof b1);
@@ -422,7 +422,7 @@ static int test_two_slot(const char *dir, const K3Cfg *c)
     ck(tr.hits == 0 && tr.misses == 2, "two-slot: after bind L1, misses=2", "");
 
     /* Verify both layers' pointer content AFTER bind L1 completes.
-     * dt_bias is F32 on disk, directly pointed — no widen area involved. */
+     * dt_bias is F32 on disk, directly pointed -- no widen area involved. */
     int dt_ok_1 = check_marker((const unsigned char *)b1.kda.dt_bias, 1, dt_ti, 32);
     ck(dt_ok_1, "two-slot: bind L1 content correct", "");
     int dt_ok_0b = check_marker((const unsigned char *)b0.kda.dt_bias, 0, dt_ti, 32);
@@ -440,7 +440,7 @@ static int test_two_slot(const char *dir, const K3Cfg *c)
      * Prefetch L2 → claims slot 0, evicts L0. */
     k3_trunk_prefetch(&tr, 2);
 
-    /* Bind L2 — blocks on reader, publishes slot 0 */
+    /* Bind L2 -- blocks on reader, publishes slot 0 */
     K3LayerBind b2; memset(&b2, 0, sizeof b2);
     if (k3_trunk_bind(&tr, c, 2, &b2) != 0) { k3_trunk_close(&tr); return 1; }
 
@@ -454,7 +454,7 @@ static int test_two_slot(const char *dir, const K3Cfg *c)
     int dt_ok_1c = check_marker((const unsigned char *)b1.kda.dt_bias, 1, dt_ti, 32);
     ck(dt_ok_1c, "ring-wrap: L1 survives L2 eviction of L0", "");
 
-    /* Now rebind L0 — evicts slot 1 (L1), loads L0 into slot 1 */
+    /* Now rebind L0 -- evicts slot 1 (L1), loads L0 into slot 1 */
     k3_trunk_prefetch(&tr, 0);
     if (k3_trunk_bind(&tr, c, 0, &b0) != 0) { k3_trunk_close(&tr); return 1; }
 
@@ -463,7 +463,7 @@ static int test_two_slot(const char *dir, const K3Cfg *c)
     ck(dt_ok_0c, "ring-wrap: rebind L0 content correct", "");
 
     /* b2 pointers (slot 0) still have L2 content.
-     * L2 is MLA — use lay.in_norm (tensor index 0, always present). */
+     * L2 is MLA -- use lay.in_norm (tensor index 0, always present). */
     int dt_ok_2c = check_marker((const unsigned char *)b2.lay.in_norm, 2, 0, 64);
     ck(dt_ok_2c, "ring-wrap: L2 survives L0 rebind", "");
 
@@ -503,7 +503,7 @@ static int test_truncated(const char *dir, const K3Cfg *c)
     K3LayerBind b2;
     memset(&b2, 0xAB, sizeof b2);
 
-    /* Prefetch L2 — the failed read must not be counted as a miss */
+    /* Prefetch L2 -- the failed read must not be counted as a miss */
     uint64_t misses_before = tr.misses;
     k3_trunk_prefetch(&tr, 2);
 
