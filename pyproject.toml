@@ -1,0 +1,19 @@
+[project]
+name = "kimi-k3-in-c"
+version = "1.0.0"
+description = "Python tooling for the Kimi K3 inference engine: fixture generation, reference-vs-C conformance, cache replay"
+requires-python = ">=3.12"
+# Pinned exact, not a range, so the next environment anyone builds from this file
+# resolves to the same versions rather than whatever happens to be newest that day.
+dependencies = [
+    "numpy==2.5.2",
+    "torch==2.13.0",
+]
+
+[dependency-groups]
+# Lint/CI-only. tiktoken is the reference tokenizer tools/tok_parity.py checks against;
+# it is never a runtime dependency of the C engine.
+dev = [
+    "ruff==0.16.3",
+    "tiktoken==0.13.0",
+]

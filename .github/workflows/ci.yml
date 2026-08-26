@@ -185,6 +185,24 @@ jobs:
             plain.f32.2d plain.bf16.1d tricky.f16.1d packed.u8.2d scalar.f32 second.shard.f32
           ./bin/k3_model.exe tests/fixtures
 
+  # CMakeLists.txt documents itself as staying interchangeable with the Make build, but
+  # nothing in CI ever actually built or ran tests through CMake before this job -- that
+  # claim was unverified. This runs the same weightless oracle test that gates the Make
+  # build through cmake/ctest instead, so a future change cannot silently break the
+  # CMake path without CI noticing.
+  cmake-build-and-test:
+    name: build + test (CMake)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libomp-dev
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build -j
+      - name: ctest
+        run: ctest --test-dir build --output-on-failure
+
   # Warnings are defects here. The engine does arithmetic on `const void *` weight
   # pointers, where a missing -Wpointer-arith silently strides by one byte.
   strict-warnings:
