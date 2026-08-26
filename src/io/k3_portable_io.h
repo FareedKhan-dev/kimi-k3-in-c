@@ -14,6 +14,14 @@
  *
  * Both call sites fall back to buffered reads when the direct path is unavailable, so
  * neither shim changes what the engine computes, only how fast it reads.
+ *
+ * A third difference is not an open() flag at all: pread() itself returns EINVAL on
+ * Darwin for a single request of 2^31 bytes or more, where Linux either succeeds or
+ * returns a short read that a retry loop already handles. The embedding table (2.35 GB)
+ * and a packed trunk layer (up to 2.37 GB) both exceed that in one contiguous span.
+ * K3_PREAD_MAX is the per-syscall cap every such read loop chunks against; on platforms
+ * without the limit it just turns one syscall into a few, which costs nothing measurable
+ * against a multi-gigabyte transfer.
  */
 #ifndef K3_PORTABLE_IO_H
 #define K3_PORTABLE_IO_H
@@ -26,6 +34,9 @@
 #endif
 
 #include <fcntl.h>
+#include <stdint.h>
+
+#define K3_PREAD_MAX ((int64_t)1 << 30)   /* 1 GiB per syscall; see file header */
 
 #if defined(__APPLE__)
 

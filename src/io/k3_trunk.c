@@ -390,8 +390,9 @@ static int load_run(K3Trunk *tr, int L, unsigned char *dst)
     const double t0 = now_s();
     int64_t got = 0;
     while (got < lay->nbytes) {
-        ssize_t r = pread(tr->fd, dst + got, (size_t)(lay->nbytes - got),
-                          (off_t)(lay->file_off + got));
+        const int64_t remain = lay->nbytes - got;
+        const int64_t req = remain < K3_PREAD_MAX ? remain : K3_PREAD_MAX;
+        ssize_t r = pread(tr->fd, dst + got, (size_t)req, (off_t)(lay->file_off + got));
         if (r <= 0) { fprintf(stderr, "k3_trunk: short read on layer %d\n", L); return -1; }
         got += r;
     }
