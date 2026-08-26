@@ -1,5 +1,8 @@
 # Contributing
 
+Real fixes and features from outside the project are credited in
+[CONTRIBUTORS.md](CONTRIBUTORS.md).
+
 ## Before anything
 
 ```bash
