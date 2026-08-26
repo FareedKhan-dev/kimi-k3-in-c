@@ -106,9 +106,13 @@ else ifneq ($(findstring MINGW,$(UNAME_S)),)
                      $(wildcard /clang64/bin/libwinpthread-1.dll) \
                      $(wildcard /clang64/bin/libc++.dll)
 else
-  # -march=native is a real win on the expert matmuls but produces a binary that will
-  # not run on an older CPU. `make portable` drops it.
-  ARCH ?= -march=native
+  # GCC uses -mcpu=native for AArch64 tuning. Keep -march=native on the x86 reference;
+  # `make portable` drops both so the produced binary is not tied to the build host.
+  ifeq ($(UNAME_M),aarch64)
+    ARCH ?= -mcpu=native
+  else
+    ARCH ?= -march=native
+  endif
   OMP_CFLAGS ?= -fopenmp
   OMP_LDFLAGS ?= -fopenmp
 endif
@@ -150,7 +154,7 @@ CLI_SRC    := src/cli/k3_run.c
 CLI_BIN    := $(BIN)/k3
 
 # Tests that need no checkpoint. These run in CI on every push.
-UNIT_TESTS := test_ops test_cache test_st test_cfg test_tok scale_test k3_model test_trunk
+UNIT_TESTS := test_ops test_cache test_st test_model_stream test_cfg test_tok scale_test k3_model test_trunk
 # Tests that need real shards. Built and run by `make test-all` with SHARD_DIR set;
 # see the weights-test target below.
 WEIGHT_TESTS := test_expert test_real_layer
@@ -192,6 +196,10 @@ $(BIN)/test_cache: tests/unit/test_cache.c $(BUILD)/src/cache/k3_cache.o \
 $(BIN)/test_st: tests/unit/test_st.c $(BUILD)/src/io/k3_st.o | $(BIN)
 	$(CC) $(CFLAGS) $(INCLUDES) $^ -o $@ $(LDFLAGS)
 
+$(BIN)/test_model_stream: tests/unit/test_model_stream.c $(BUILD)/src/model/k3_bind.o \
+                          $(BUILD)/src/io/k3_st.o $(BUILD)/src/core/k3_ops.o | $(BIN)
+	$(CC) $(CFLAGS) $(INCLUDES) $^ -o $@ $(LDFLAGS)
+
 # The tokenizer and config reader are portable C99 with no OpenMP and no platform calls,
 # so they build and are verifiable on any machine, including one with no checkpoint.
 $(BIN)/test_tok: tests/unit/test_tok.c | $(BIN)
@@ -218,11 +226,19 @@ $(BIN)/bench_kernels: benchmarks/bench_kernels.c $(BUILD)/src/core/k3_ops.o | $(
 	$(CC) $(CFLAGS) $(INCLUDES) $^ -o $@ $(LDFLAGS)
 
 ## test: everything that needs no model weights
-test: $(TEST_BINS)
+test: $(CLI_BIN) $(TEST_BINS)
+	@echo "== ultra CLI contract =="; \
+	  if ./$(CLI_BIN) fake --ids 1 --preset ultra >/dev/null 2>&1; then \
+	      echo "ultra mode accepted a missing --trunk"; exit 1; \
+	  else rc=$$?; test $$rc -eq 2 || exit 1; fi; \
+	  if ./$(CLI_BIN) fake --ids 1 --preset ultra --trunk fake --spec 2 >/dev/null 2>&1; then \
+	      echo "ultra mode accepted --spec"; exit 1; \
+	  else rc=$$?; test $$rc -eq 2 || exit 1; fi
 	@echo "== op kernels ==";        ./$(BIN)/test_ops $(FIXTURES)/ops
 	@echo "== streaming cache ==";   ./$(BIN)/test_cache $(FIXTURES)/cache
 	@echo "== safetensors ==";       ./$(BIN)/test_st $(FIXTURES)/st $(BUILD)/st_index.json \
 	    plain.f32.2d plain.bf16.1d tricky.f16.1d packed.u8.2d scalar.f32 second.shard.f32
+	@echo "== model streaming ==";   ./$(BIN)/test_model_stream $(FIXTURES)/st
 	@echo "== config reader ==";     ./$(BIN)/test_cfg fixture $(FIXTURES)/ref_k3.json
 	@echo "== config refusals =="; \
 	  for f in no_layermap bad_layer_index bad_topk; do \
@@ -283,7 +299,7 @@ bench: $(BIN)/bench_kernels
 # On x86-64 that means a generic AVX2 + FMA baseline. On arm64 there is no equivalent
 # sub-baseline worth naming -- the ISA is the baseline -- so tuning is simply omitted.
 portable:
-ifeq ($(UNAME_S)/$(UNAME_M),Darwin/arm64)
+ifneq ($(filter arm64 aarch64,$(UNAME_M)),)
 	$(MAKE) ARCH= all
 else
 	$(MAKE) ARCH="-mavx2 -mfma" all

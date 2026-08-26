@@ -220,7 +220,8 @@ jobs:
         run: |
           make CFLAGS="-O1 -g -std=gnu99 -Wall -Wextra -fsanitize=address,undefined -fno-omit-frame-pointer" \
                LDFLAGS="-lm -fsanitize=address,undefined" ARCH= \
-               bin/test_ops bin/test_cfg bin/test_cache bin/test_st bin/k3_model \
+               bin/test_ops bin/test_cfg bin/test_cache bin/test_st \
+               bin/test_model_stream bin/k3_model \
                bin/bench_kernels \
                -j"$(nproc)"
       - name: Run under sanitizers
@@ -236,6 +237,7 @@ jobs:
           ./bin/test_cache tests/fixtures/cache
           ./bin/test_st tests/fixtures/st "$RUNNER_TEMP/idx.json" \
             plain.f32.2d plain.bf16.1d tricky.f16.1d packed.u8.2d scalar.f32 second.shard.f32
+          ./bin/test_model_stream tests/fixtures/st
           ./bin/k3_model tests/fixtures
           # The ms and GFLOP/s it prints are meaningless under -O1 with ASan interceptors
           # on every load. It is run for what ASan sees, not for what it reports.
