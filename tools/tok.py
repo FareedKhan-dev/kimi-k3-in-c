@@ -198,7 +198,7 @@ def main():
         print(__doc__)
         return 2
     mode, arg = sys.argv[1], sys.argv[2]
-    enc, cfg, special = load()
+    enc, _cfg, special = load()
 
     if mode == "encode":
         ids = enc.encode(arg, allowed_special=set(special))
