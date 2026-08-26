@@ -99,6 +99,7 @@ k3_add_test(test_st     tests/unit/test_st.c)
 k3_add_test(test_cfg    tests/unit/test_cfg.c)
 k3_add_test(test_tok    tests/unit/test_tok.c)
 k3_add_test(scale_test  tests/unit/scale_test.c)
+k3_add_test(test_trunk  tests/unit/test_trunk.c)
 k3_add_test(k3_model    tests/unit/k3_model.c)
 
 set(FIX ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures)
@@ -110,6 +111,7 @@ add_test(NAME ops        COMMAND test_ops   ${FIX}/ops)
 add_test(NAME cache      COMMAND test_cache ${FIX}/cache)
 add_test(NAME config     COMMAND test_cfg   fixture ${FIX}/ref_k3.json)
 add_test(NAME scale      COMMAND scale_test)
+add_test(NAME trunk      COMMAND test_trunk)
 add_test(NAME oracle     COMMAND k3_model   ${FIX})
 
 # The negative half of the config contract. Each fixture is the working flat config with
