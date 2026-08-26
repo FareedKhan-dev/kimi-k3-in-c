@@ -38,6 +38,14 @@
 #include "k3.h"
 #include "k3_load.h"
 
+#ifdef _WIN32
+/* sync() and /proc/sys/vm/drop_caches are both Linux-only; drop_caches() below is only
+ * ever reached when have_root() has already confirmed drop_caches exists, which it
+ * never does on Windows, so this body is dead code at runtime -- it only needs to
+ * compile, not do anything. */
+static inline void sync(void) { }
+#endif
+
 /* Non-zero if any correctness check failed; becomes the exit status. */
 static int g_bad = 0;
 

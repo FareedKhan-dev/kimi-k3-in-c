@@ -200,7 +200,7 @@ The gate is storage: **the checkpoint is 1.56 TB.** Everything else is ordinary.
 
 | | | |
 |---|---|---|
-| **OS** | Linux, x86-64 | uses `O_DIRECT`, `posix_memalign`, `getrusage` |
+| **OS** | Linux, x86-64 (reference); macOS/arm64 and Windows/x86-64 also build and pass every gate | uses `O_DIRECT`, `posix_memalign`, `getrusage` -- ported for Windows via MSYS2's MinGW-w64 (see `src/io/k3_portable_io.h`) |
 | **CPU** | AVX2 + FMA | AVX-512 unnecessary. `make portable` targets generic AVX2 |
 | **RAM** | 8 GB and up | every preset works; more memory is faster, never different |
 | **Storage** | ~1.7 TB free | 1.56 TB checkpoint + 109 GB packed trunk, ideally on fast local disk |
@@ -582,8 +582,23 @@ hour in. Shorten the request, or drop `--incremental`, which carries no KV cache
 **Is the whole 1.56 TB needed?** For generation, yes. For development, no: `make test`
 needs nothing at all, and `--layers N` runs against partial shard sets.
 
-**macOS, Windows, WSL?** The engine targets Linux. The tokenizer and config reader are
-portable C99 and are built portably in CI.
+**macOS, Windows, WSL?** Linux is the reference platform. macOS/arm64 builds with plain
+`make` (see the Makefile's platform block). Windows builds natively too, via MSYS2's
+MinGW-w64 GCC (`pacman -S mingw-w64-x86_64-gcc`, then open the "MSYS2 MinGW x64" shell
+specifically -- `make`, `make test`, and `make test-all` all pass every gate unmodified,
+including the full-model oracle and tokenizer parity against real Kimi K3 weights.
+Four Linux-only calls needed porting -- `O_DIRECT`, `pread`, `posix_memalign`, and
+`getrusage` -- documented in `src/io/k3_portable_io.h`. One real bug surfaced during the
+port and is worth knowing if you extend this code on Windows: `_aligned_malloc`, which
+backs the `posix_memalign` shim, must be freed with `_aligned_free`, not plain `free`;
+POSIX's `posix_memalign` carries no such restriction, so this is easy to get wrong
+silently -- it compiles, and Windows terminates the process with `STATUS_HEAP_CORRUPTION`
+only once the corrupted allocator metadata is actually used. `make asan`/`make ubsan`
+switch to Clang on Windows (`pacman -S mingw-w64-clang-x86_64-clang
+mingw-w64-clang-x86_64-compiler-rt`): MinGW-w64's GCC package ships no sanitizer runtime
+at all, confirmed directly rather than assumed. WSL works too, unmodified, since it is
+just Linux -- the tokenizer and config reader are portable C99 either way and build
+anywhere, in CI included.
 
 ---
 
