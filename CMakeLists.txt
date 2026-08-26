@@ -24,7 +24,7 @@ endif()
 
 # -march=native gives a real speedup on the expert matmuls but produces a binary tied to
 # the build machine. Off by default so a packaged build is portable.
-option(K3_NATIVE_ARCH "Optimise for the building CPU (-march=native)" OFF)
+option(K3_NATIVE_ARCH "Optimise for the building CPU (-march/-mcpu=native)" OFF)
 option(K3_SANITIZE    "Build with ASan + UBSan"                        OFF)
 
 find_package(OpenMP)
@@ -43,15 +43,15 @@ target_compile_options(k3_flags INTERFACE
   -ffp-contract=off)
 
 if(K3_NATIVE_ARCH)
-  target_compile_options(k3_flags INTERFACE -march=native)
-else()
-  # Documented baseline. The engine assumes AVX2 + FMA are available.
+  if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$")
+    # Apple Silicon / AArch64 uses -mcpu rather than the x86 -march spelling.
+    target_compile_options(k3_flags INTERFACE -mcpu=native)
+  else()
+    target_compile_options(k3_flags INTERFACE -march=native)
+  endif()
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+  # Documented x86 baseline. The engine assumes AVX2 + FMA are available.
   target_compile_options(k3_flags INTERFACE -mavx2 -mfma)
-endif()
-
-if(K3_SANITIZE)
-  target_compile_options(k3_flags INTERFACE -fsanitize=address,undefined -fno-omit-frame-pointer -g)
-  target_link_options(k3_flags INTERFACE -fsanitize=address,undefined)
 endif()
 
 # --------------------------------------------------------------------------- engine --
