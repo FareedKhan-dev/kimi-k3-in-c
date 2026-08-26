@@ -183,7 +183,7 @@ static int model_bind(Model *m, Store *s, const K3Cfg *c)
 }
 
 static void forward(Model *m, const K3Cfg *c, const int *ids, int T, float *logits,
-                    float *scratch, float *h, float *br, float *kstate)
+                    float *scratch, float *h, float *br, float *kstate, int reuse_state)
 {
     const int E = c->hidden;
     const int maxb = c->n_layers / c->attn_res_block + 2;
@@ -196,11 +196,14 @@ static void forward(Model *m, const K3Cfg *c, const int *ids, int T, float *logi
                (size_t)E * sizeof(float));
 
     memset(br, 0, (size_t)T * (size_t)maxb * (size_t)E * sizeof(float));
-    memset(kstate, 0, kper * (size_t)c->n_layers * sizeof(float));
+    if (!reuse_state) memset(kstate, 0, kper * (size_t)c->n_layers * sizeof(float));
     int nb = 0;
-    for (int L = 0; L < c->n_layers; L++)
+    for (int L = 0; L < c->n_layers; L++) {
+        float *state = kstate + (reuse_state ? 0 : kper * (size_t)L);
+        if (reuse_state) memset(state, 0, kper * sizeof(float));
         k3_decoder_layer(h, br, &nb, &m->lay[L], c, L, T,
-                         kstate + kper * (size_t)L, scratch);
+                         state, scratch);
+    }
 
     /* The MODEL-LEVEL aggregator. Beyond the 2 per layer there is one more:
      * output_attn_res_{norm,proj}. The tensor census counts exactly 1 of these.
@@ -309,7 +312,7 @@ int main(int argc, char **argv)
     float *ks   = (float *)malloc(kper * (size_t)c.n_layers * sizeof(float));
     float *lg   = (float *)malloc((size_t)T * (size_t)c.vocab * sizeof(float));
 
-    forward(m, &c, full, T, lg, scratch, h, br, ks);
+    forward(m, &c, full, T, lg, scratch, h, br, ks, 0);
     int tf_all = 0, tf_gen = 0, tf_gen_ok = 0;
     for (int i = 0; i < T; i++) {
         const int got = argmax_(lg + (size_t)i * (size_t)c.vocab, c.vocab);
@@ -320,11 +323,27 @@ int main(int argc, char **argv)
     printf("GATE 1  teacher forcing : %d/%d positions match tf_pred\n", tf_all, T);
     printf("        generated span  : %d/%d  <- must be exact\n", tf_gen_ok, tf_gen);
 
+    /* Full recompute never returns to a layer after its whole sequence has finished, so
+     * its KDA matrix and ShortConv history have no lifetime beyond that layer. The CLI's
+     * ultra path therefore reuses one slot instead of retaining n_layers copies. Demand
+     * bit-identical logits against the old layout; token-only equality would hide a
+     * near-tie or a stale-state error. */
+    float *ks_reuse = (float *)malloc(kper * sizeof(float));
+    float *lg_reuse = (float *)malloc((size_t)T * (size_t)c.vocab * sizeof(float));
+    int reuse_ok = 0;
+    if (ks_reuse && lg_reuse) {
+        forward(m, &c, full, T, lg_reuse, scratch, h, br, ks_reuse, 1);
+        reuse_ok = memcmp(lg, lg_reuse,
+                          (size_t)T * (size_t)c.vocab * sizeof(float)) == 0;
+    }
+    printf("GATE 1b state reuse      : %s  <- all logits bit-identical\n",
+           reuse_ok ? "PASS" : "FAIL");
+
     int *gen = (int *)malloc((size_t)T * sizeof(int));
     memcpy(gen, full, (size_t)np * sizeof(int));
     int cur = np, gok = 0;
     while (cur < T) {
-        forward(m, &c, gen, cur, lg, scratch, h, br, ks);
+        forward(m, &c, gen, cur, lg, scratch, h, br, ks, 0);
         gen[cur] = argmax_(lg + (size_t)(cur - 1) * (size_t)c.vocab, c.vocab);
         if (gen[cur] == full[cur]) gok++;
         cur++;
@@ -414,7 +433,7 @@ int main(int argc, char **argv)
         free(kvc); free(rpc); free(sc_i); free(h_i); free(br_i); free(ks_i); free(lg_i); free(gi);
     }
 
-    const int pass = (tf_gen_ok == tf_gen) && (gok == T - np);
+    const int pass = (tf_gen_ok == tf_gen) && reuse_ok && (gok == T - np);
     printf("\nVERDICT: %s\n", pass ? "ENGINE MATCHES THE REFERENCE EXACTLY"
                                    : "MISMATCH, see the counts above");
     if (!pass) {
@@ -426,6 +445,7 @@ int main(int argc, char **argv)
     }
 
     free(full); free(gen); free(scratch); free(h); free(br); free(ks); free(lg);
+    free(ks_reuse); free(lg_reuse);
     for (int L = 0; L < c.n_layers; L++) { free(m->w1[L]); free(m->w3[L]); free(m->w2[L]); }
     free(m);
 

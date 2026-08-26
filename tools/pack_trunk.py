@@ -51,19 +51,30 @@ def main():
     nlayers = int(sys.argv[3]) if len(sys.argv) > 3 else 93
     os.makedirs(out, exist_ok=True)
 
-    print("indexing %d shards..." % len(os.listdir(src)))
+    shard_names = sorted(fn for fn in os.listdir(src) if fn.endswith(".safetensors"))
+    print("indexing %d safetensors shards..." % len(shard_names))
     # name -> (shard_path, absolute_offset, nbytes, dtype, shape)
     where = {}
-    for fn in sorted(os.listdir(src)):
-        if not fn.endswith(".safetensors"):
-            continue
+    skipped_routed = 0
+    for fn in shard_names:
         p = os.path.join(src, fn)
         hdr, base = shard_header(p)
         for name, e in hdr.items():
             if name == "__metadata__":
                 continue
+            # Routed experts remain in the official shards and are streamed from there;
+            # they are never copied into trunk.bin. Avoid retaining their hundreds of
+            # thousands of Python dict entries just to reject them again per layer.
+            # Routers and shared experts do not match this path and remain in the exact
+            # dense trunk.
+            if ".block_sparse_moe.experts." in name:
+                skipped_routed += 1
+                continue
             a, b = e["data_offsets"]
             where[name] = (p, base + a, b - a, e["dtype"], e["shape"])
+
+    print("indexed %d trunk tensors; skipped %d routed-expert metadata entries"
+          % (len(where), skipped_routed))
 
     manifest = {"n_layers": nlayers, "align": ALIGN, "layers": []}
     total = 0

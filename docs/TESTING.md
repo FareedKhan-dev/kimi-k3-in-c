@@ -31,6 +31,11 @@ on it, producing fluent but wrong tokens with no diagnostic.
 **`test_st`**, the safetensors reader: dtype widening, offsets, tail bytes, escaped
 tensor names, and a tensor deliberately containing non-finite values.
 
+**`test_model_stream`**, the ultra-low-memory model-table reader. It gathers one BF16
+embedding row and projects through the lm_head in bounded aligned chunks, then requires
+both results to be bit-identical to the resident kernels. It also injects a corrupt file
+offset and requires the resulting short read to fail without being counted as valid I/O.
+
 **`test_cfg`**, the config reader against the fixture layout, plus three malformed configs
 in `tests/fixtures/cfg/` it must **refuse**: `no_layermap.json` (no `full_attn_layers` at
 all), `bad_layer_index.json` (a one-based index outside `1..n_layers`), and
@@ -76,6 +81,7 @@ first case. The roundtrip leg in `make test` needs only `tiktoken.model` and
 architecture exactly:
 
 - teacher forcing: every position matches the reference
+- full-recompute state reuse: every logit is bit-identical with one recurrent-state slot
 - greedy decode: every generated token matches
 - incremental decode: same tokens as full recompute, with KV cache and carried
   recurrent state
