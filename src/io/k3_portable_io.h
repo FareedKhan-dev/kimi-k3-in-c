@@ -132,18 +132,34 @@ static inline long long k3_pread(int fd, void *buf, size_t count, long long offs
 /* O_DIRECT has to be intercepted at open() itself: unlike Darwin's post-hoc fcntl,
  * Windows has no way to add FILE_FLAG_NO_BUFFERING to an already-open handle. The
  * bridge back to a plain int fd -- so every other pread()/close() call site in the
- * codebase stays untouched -- goes through _open_osfhandle. */
+ * codebase stays untouched -- goes through _open_osfhandle.
+ *
+ * Every reader call site in this codebase passes O_RDONLY, so the access mode below
+ * matters only to a caller outside the streaming path, such as a test that opens a
+ * fixture file for writing: CreateFileA needs GENERIC_WRITE for that, or a later
+ * ftruncate/write on the resulting handle fails with access denied even though the
+ * open() call itself succeeded. */
 static inline int k3_win_open(const char *path, int flags, ...)
 {
     DWORD fileFlags = FILE_ATTRIBUTE_NORMAL;
     if (flags & O_DIRECT) fileFlags |= FILE_FLAG_NO_BUFFERING;
 
-    HANDLE h = CreateFileA(path, GENERIC_READ,
+    DWORD access = GENERIC_READ;
+    int crtFlags = _O_RDONLY;
+    if ((flags & (O_WRONLY | O_RDWR)) == O_WRONLY) {
+        access = GENERIC_WRITE;
+        crtFlags = _O_WRONLY;
+    } else if (flags & O_RDWR) {
+        access = GENERIC_READ | GENERIC_WRITE;
+        crtFlags = _O_RDWR;
+    }
+
+    HANDLE h = CreateFileA(path, access,
                             FILE_SHARE_READ | FILE_SHARE_WRITE,
                             NULL, OPEN_EXISTING, fileFlags, NULL);
     if (h == INVALID_HANDLE_VALUE) { errno = ENOENT; return -1; }
 
-    int fd = _open_osfhandle((intptr_t)h, _O_RDONLY | _O_BINARY);
+    int fd = _open_osfhandle((intptr_t)h, crtFlags | _O_BINARY);
     if (fd < 0) { CloseHandle(h); errno = EMFILE; return -1; }
     return fd;
 }
