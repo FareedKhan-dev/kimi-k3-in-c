@@ -289,7 +289,7 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
-      - run: pip install --quiet tiktoken
+      - run: pip install --quiet tiktoken==0.13.0
 
       # This job compiles the tokenizer and, when the vocabulary is available, checks it
       # against the reference implementation.
@@ -323,7 +323,7 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
-      - run: pip install --quiet ruff
+      - run: pip install --quiet ruff==0.16.3
       # Gates. Style drift in tools that generate the test fixtures is worth catching,
       # and an unparseable tool is a broken fixture pipeline.
       - run: ruff check tools/ --output-format=github
