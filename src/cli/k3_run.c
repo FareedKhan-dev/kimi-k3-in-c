@@ -1569,7 +1569,7 @@ int main(int argc, char **argv)
                 "\"lm_head_bytes_read\":%llu,\"ultra_low_memory\":%s,"
                 "\"generated_text\":",
                 NL, NL, w.layers_completed, k3_expert_drops, peak_b, t_total,
-                t_total / nout, (unsigned long long)expert_bytes_total,
+                nout ? t_total / nout : 0.0, (unsigned long long)expert_bytes_total,
                 (unsigned long long)(w.trunk ? w.trunk->bytes_read : 0),
                 (unsigned long long)w.ms.embed_bytes_read,
                 (unsigned long long)w.ms.lm_head_bytes_read,
