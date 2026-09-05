@@ -361,7 +361,13 @@ static void usage(FILE *f)
 "  --gen N               tokens to generate (default 8)\n"
 "  --stop-id N           halt after emitting token id N (repeatable, up to 8). The\n"
 "                        stop id is kept in the sequence, so --save-state and a later\n"
-"                        --load-state continue from what was actually produced\n"
+"                        --load-state continue from what was actually produced.\n"
+"                        Off by default: without it --gen N means exactly N tokens,\n"
+"                        which the benchmarks and oracle gates rely on. Note the\n"
+"                        released checkpoint declares TWO end ids that disagree:\n"
+"                        config.json says 163586 (<|end_of_msg|>), tokenizer_config\n"
+"                        .json says 163585 ([EOS]), and the model emits 163585.\n"
+"                        Pass both to stop on either\n"
 "  --incremental         carry KV cache and recurrent state between tokens\n"
 "  --save-state PATH     write the carried state after the run, so the next turn of a\n"
 "                        conversation resumes instead of re-reading the whole prompt\n"
@@ -683,7 +689,7 @@ int main(int argc, char **argv)
      * sequence the model actually produced. Without this the engine always runs to
      * --gen, which for a chat-tuned checkpoint means paying seconds per token for text
      * past the end-of-message marker that a caller will only throw away. */
-    int stop_id[8]; int n_stop = 0, hit_stop = 0;
+    int stop_id[8]; int n_stop = 0, hit_stop = 0, stopped_at = -1;
     double cache_gb = 64.0, trunk_gb = 16.0;
     int budget_auto = 0;
     int spec_n = 0;
@@ -706,7 +712,20 @@ int main(int argc, char **argv)
                         (int)(sizeof stop_id / sizeof stop_id[0]));
                 return 2;
             }
-            stop_id[n_stop++] = atoi(argv[++i]);
+            /* strtol, not atoi: atoi("abc") is 0, which is a real token id, so a typo
+             * would silently arm a stop on a token the model may well emit. Refuse
+             * anything that is not entirely a non-negative integer; the range check
+             * against the vocabulary has to wait until config.json has been read. */
+            {
+                char *end;
+                const long v = strtol(argv[++i], &end, 10);
+                if (*argv[i] == '\0' || *end != '\0' || v < 0) {
+                    fprintf(stderr, "--stop-id %s: expected a non-negative token id\n",
+                            argv[i]);
+                    return 2;
+                }
+                stop_id[n_stop++] = (int)v;
+            }
         }
         else if (!strcmp(argv[i], "--cache-gb") && i + 1 < argc) cache_gb = atof(argv[++i]);
         else if (!strcmp(argv[i], "--layers") && i + 1 < argc) want_layers = atoi(argv[++i]);
@@ -929,6 +948,15 @@ int main(int argc, char **argv)
                         "tokens (outtok[%d])\n", gen, K3_MAX_GEN, K3_MAX_GEN);
         return 2;
     }
+    /* A stop id the model can never emit gives a run that never stops, which is
+     * indistinguishable from a model that simply did not produce one, and the two
+     * need different fixes. Refuse it here, where the vocabulary is finally known. */
+    for (int s = 0; s < n_stop; s++)
+        if (stop_id[s] >= c.vocab) {
+            fprintf(stderr, "--stop-id %d is outside the vocabulary of %d\n",
+                    stop_id[s], c.vocab);
+            return 2;
+        }
     if (np > K3_MAX_PROMPT) {
         fprintf(stderr, "prompt of %d ids exceeds the %d-id ceiling (seq[%d])\n",
                 np, K3_MAX_PROMPT, K3_MAX_PROMPT + K3_MAX_GEN);
@@ -1505,11 +1533,11 @@ int main(int argc, char **argv)
             /* Checked here rather than per step so a speculative sweep that verifies
              * past a stop id is truncated at the stop, exactly like serial decode. */
             for (int s = 0; s < n_stop; s++)
-                if (emit[i] == stop_id[s]) { hit_stop = 1; break; }
+                if (emit[i] == stop_id[s]) { hit_stop = 1; stopped_at = emit[i]; break; }
             if (hit_stop) break;
         }
         if (hit_stop) {
-            printf("stop id reached after %d tokens\n", nout);
+            printf("stop id %d reached after %d of %d tokens\n", stopped_at, nout, gen);
             break;
         }
         if (T >= Tmax) break;
@@ -1584,13 +1612,14 @@ int main(int argc, char **argv)
                 "\"seconds_per_token\":%.4f,\"expert_bytes_read\":%llu,"
                 "\"trunk_bytes_read\":%llu,\"embedding_bytes_read\":%llu,"
                 "\"lm_head_bytes_read\":%llu,\"ultra_low_memory\":%s,"
+                "\"stopped_at\":%d,"
                 "\"generated_text\":",
                 NL, NL, w.layers_completed, k3_expert_drops, peak_b, t_total,
                 t_total / nout, (unsigned long long)expert_bytes_total,
                 (unsigned long long)(w.trunk ? w.trunk->bytes_read : 0),
                 (unsigned long long)w.ms.embed_bytes_read,
                 (unsigned long long)w.ms.lm_head_bytes_read,
-                w.ultra ? "true" : "false");
+                w.ultra ? "true" : "false", stopped_at);
         json_string(f, generated_text);
         fputs("}\n", f);
         fclose(f);

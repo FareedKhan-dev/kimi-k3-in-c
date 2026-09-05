@@ -234,6 +234,17 @@ test: $(CLI_BIN) $(TEST_BINS)
 	  if ./$(CLI_BIN) fake --ids 1 --preset ultra --trunk fake --spec 2 >/dev/null 2>&1; then \
 	      echo "ultra mode accepted --spec"; exit 1; \
 	  else rc=$$?; test $$rc -eq 2 || exit 1; fi
+	@echo "== stop-id contract =="; \
+	  for bad in "abc" "-1" "1 --stop-id 2 --stop-id 3 --stop-id 4 --stop-id 5 --stop-id 6 --stop-id 7 --stop-id 8 --stop-id 9"; do \
+	      out=$$(./$(CLI_BIN) fake --ids 1 --stop-id $$bad 2>&1); rc=$$?; \
+	      test $$rc -eq 2 || { echo "  --stop-id $$bad returned $$rc, expected 2"; exit 1; }; \
+	      case "$$out" in *--stop-id*) ;; \
+	          *) echo "  --stop-id $$bad was refused, but not because of --stop-id:"; \
+	             echo "      $$out"; \
+	             echo "  the model dir is 'fake', so asserting only the exit code would"; \
+	             echo "  pass on the loader's error and prove nothing"; exit 1;; \
+	      esac; \
+	  done; echo "  3 malformed stop lists refused, each for the right reason"
 	@echo "== op kernels ==";        ./$(BIN)/test_ops $(FIXTURES)/ops
 	@echo "== streaming cache ==";   ./$(BIN)/test_cache $(FIXTURES)/cache
 	@echo "== safetensors ==";       ./$(BIN)/test_st $(FIXTURES)/st $(BUILD)/st_index.json \
