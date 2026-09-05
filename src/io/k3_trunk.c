@@ -386,20 +386,42 @@ static int k3_alloc_direct(void **out, size_t bytes)
     return 0;
 }
 
+/* One layer is ~1.17 GB. A single sequential pread loop leaves the drive at queue
+ * depth 1 (issue, wait, issue), which on NVMe reaches roughly half its rated rate --
+ * measured 3.1 GB/s here against 6.7 GB/s on the expert path, which already reads in
+ * parallel (k3_cache.c cache_getmany). Splitting the layer into aligned chunks issued
+ * under OpenMP gives the same depth. Chunks are multiples of K3_TRUNK_ALIGN and layer
+ * offsets/sizes are too, so every chunk's offset and length stay aligned -- required
+ * by O_DIRECT on Linux and harmless to F_NOCACHE on Darwin. */
+#define K3_TRUNK_CHUNK ((int64_t)64 << 20)   /* 64 MiB, a multiple of K3_TRUNK_ALIGN */
+
 static int load_run(K3Trunk *tr, int L, unsigned char *dst)
 {
     const K3TrunkLayer *lay = &tr->lay[L];
     const double t0 = now_s();
-    int64_t got = 0;
-    while (got < lay->nbytes) {
-        const int64_t remain = lay->nbytes - got;
-        const int64_t req = remain < K3_PREAD_MAX ? remain : K3_PREAD_MAX;
-        ssize_t r = pread(tr->fd, dst + got, (size_t)req, (off_t)(lay->file_off + got));
-        if (r <= 0) { fprintf(stderr, "k3_trunk: short read on layer %d\n", L); return -1; }
-        got += r;
+    const int64_t nb = lay->nbytes;
+    const int nchunk = (int)((nb + K3_TRUNK_CHUNK - 1) / K3_TRUNK_CHUNK);
+    volatile int failed = 0;
+#ifdef _OPENMP
+#   pragma omp parallel for schedule(dynamic, 1)
+#endif
+    for (int ci = 0; ci < nchunk; ci++) {
+        if (failed) continue;
+        const int64_t base = (int64_t)ci * K3_TRUNK_CHUNK;
+        const int64_t len = (nb - base < K3_TRUNK_CHUNK) ? nb - base : K3_TRUNK_CHUNK;
+        int64_t got = 0;
+        while (got < len) {
+            int64_t want = len - got;
+            if (want > K3_PREAD_MAX) want = K3_PREAD_MAX;
+            ssize_t r = pread(tr->fd, dst + base + got, (size_t)want,
+                              (off_t)(lay->file_off + base + got));
+            if (r <= 0) { failed = 1; break; }
+            got += r;
+        }
     }
+    if (failed) { fprintf(stderr, "k3_trunk: short read on layer %d\n", L); return -1; }
     tr->load_seconds += now_s() - t0;
-    tr->bytes_read += (uint64_t)got;
+    tr->bytes_read += (uint64_t)nb;
     return 0;
 }
 
