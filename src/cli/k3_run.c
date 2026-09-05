@@ -353,6 +353,10 @@ static void usage(FILE *f)
 "  --list-presets        show each preset's split and expected speed\n"
 "  --trunk DIR           packed trunk directory; enables streaming (see scripts/)\n"
 "  --trunk-gb X          trunk ring / pinned-layer budget\n"
+"  --trunk-ring N        streaming ring slots (default 2). One slot is the layer being\n"
+"                        computed on, the rest are reads in flight. A third slot lets\n"
+"                        the reader run a layer further ahead and costs one more slot\n"
+"                        of RAM; the budget still wins if it does not fit\n"
 "  --cache-gb X          routed-expert cache budget\n"
 "  --ultra-low-memory    stream embedding rows and lm_head chunks, and reuse one\n"
 "                        recurrent-state slot during full recompute; needs --trunk\n"
@@ -684,6 +688,7 @@ int main(int argc, char **argv)
     const char *load_state = NULL, *save_state = NULL;
     const char *preset_name = NULL;
     int incremental = 0, ultra = 0;
+    int trunk_ring = 0;   /* 0 selects k3_trunk_open's default of 2 */
     for (int i = 2; i < argc; i++) {
         if (!strcmp(argv[i], "--ids") && i + 1 < argc) ids_s = argv[++i];
         else if (!strcmp(argv[i], "--prompt") && i + 1 < argc) prompt_text = argv[++i];
@@ -706,6 +711,7 @@ int main(int argc, char **argv)
             if (!strcmp(v, "auto")) budget_auto = 1;
             else { trunk_gb = atof(v); budget_auto = 0; }
         }
+        else if (!strcmp(argv[i], "--trunk-ring") && i + 1 < argc) trunk_ring = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--incremental")) incremental = 1;
         else if (!strcmp(argv[i], "--ultra-low-memory")) ultra = 1;
         else if (!strcmp(argv[i], "--dump-logits") && i + 1 < argc) logits_path = argv[++i];
@@ -1061,7 +1067,8 @@ int main(int argc, char **argv)
          * and becomes a dial, and unlike quantisation it costs no accuracy, which
          * matters because the K3 report (4.1.4) keeps exactly these tensors in higher
          * precision on purpose. */
-        if (k3_trunk_open(&trunk, trunk_dir, &c, (int64_t)(trunk_gb * 1e9)) != 0) return 1;
+        if (k3_trunk_open(&trunk, trunk_dir, &c, (int64_t)(trunk_gb * 1e9),
+                          trunk_ring) != 0) return 1;
         if (trunk.n_layers < NL) {
             fprintf(stderr, "packed trunk has %d layers, need %d\n", trunk.n_layers, NL);
             return 1;
@@ -1259,7 +1266,8 @@ int main(int argc, char **argv)
                 spec_snap = (float *)malloc(kper_f * (size_t)w.n_bound * sizeof(float));
                 if (!spec_snap) { fprintf(stderr, "OOM for the --spec snapshot\n"); return 1; }
             }
-            if (k3_trunk_open(&trunk_d, draft_dir, &c, (int64_t)(draft_gb * 1e9)) != 0)
+            if (k3_trunk_open(&trunk_d, draft_dir, &c, (int64_t)(draft_gb * 1e9),
+                              trunk_ring) != 0)
                 return 1;
             dw.lay = (K3LayerBind *)calloc((size_t)NL, sizeof(K3LayerBind));
             dks   = (float *)calloc(kper_f * (size_t)w.n_bound, sizeof(float));

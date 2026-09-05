@@ -19,20 +19,51 @@
 #include "json.h"
 #include "k3_st.h"
 #include "k3_trunk.h"
+#include "k3_uring.h"
 
 static int k3_alloc_direct(void **out, size_t bytes);   /* defined below */
 
+/* THE READER, and the two invariants that keep a deeper ring from corrupting output.
+ *
+ * With one slot in flight the old design could stay informal: the worker held one
+ * request, the main thread waited for exactly that request, and the round-robin could
+ * not collide with the slot the caller was computing on because there were only ever two.
+ * A ring of three or more, kept full, breaks all of these by construction, so the rules
+ * are now explicit and enforced in one place, claim_slot_locked:
+ *
+ *   1. A slot being READ INTO is never handed out again. pending[s] names the layer
+ *      whose read is in progress, and a claim skips any such slot. This is the same
+ *      hazard K3_SLOT_INFLIGHT solves in the expert cache, and it cost a wrong token
+ *      there before it was understood.
+ *   2. The slot the CALLER IS CURRENTLY USING is never evicted. `held` names it. Without
+ *      this the prefetcher wraps the ring and preads the next layer straight over the
+ *      weights the main thread is multiplying: the read succeeds, no pointer changes,
+ *      and the run finishes with fluent wrong tokens. That exact failure was measured on
+ *      the released checkpoint when a single-slot ring was given a reader thread.
+ *   3. A slot holding a layer the walk is ABOUT TO REACH is never evicted either. See
+ *      upcoming(). This one costs bytes rather than correctness, which is why it went
+ *      unnoticed: the layer is simply read a second time.
+ *
+ * Everything that touches layer_of, slot_of, ring, pending or the request queue holds
+ * io->mu. The READS themselves happen outside it, which is the entire point: the worker
+ * and the main thread can both have a transfer in flight.
+ */
+#define K3_TRUNK_MAXRING 8
+
 typedef struct {
     pthread_t thread;
+    int       running;
     pthread_mutex_t mu;
-    pthread_cond_t cv;
-    K3Trunk *tr;
-    int stop;
-    int busy;
-    int done;
-    int layer;
-    int slot;
-    int result;
+    pthread_cond_t  cv_work;    /* worker waits here for a request        */
+    pthread_cond_t  cv_done;    /* main thread waits here for a read      */
+    K3Trunk  *tr;
+    int       stop;
+    int       q[K3_TRUNK_MAXRING];      /* queued layers, FIFO            */
+    int       qslot[K3_TRUNK_MAXRING];
+    int       nq;
+    int       pending[K3_TRUNK_MAXRING];/* [slot] layer being read, or -1 */
+    int       held;                     /* slot the caller is using, or -1 */
+    K3Uring  *ur;                       /* the worker's own ring          */
 } K3TrunkIO;
 
 static void *trunk_io_main(void *arg);
@@ -97,7 +128,8 @@ static int find_in_layer(void *ctx, const char *name,
     return -1;
 }
 
-int k3_trunk_open(K3Trunk *tr, const char *dir, const K3Cfg *c, int64_t budget_bytes)
+int k3_trunk_open(K3Trunk *tr, const char *dir, const K3Cfg *c, int64_t budget_bytes,
+                  int ring_want)
 {
     memset(tr, 0, sizeof *tr);
     /* memset leaves fd == 0, which is stdin. Every failure path below returns without
@@ -192,59 +224,112 @@ int k3_trunk_open(K3Trunk *tr, const char *dir, const K3Cfg *c, int64_t budget_b
     if (!tr->slot_of) return -1;
     for (int i = 0; i < tr->n_layers; i++) tr->slot_of[i] = -1;
 
-    /* Two ring slots: the layer being computed on, plus one asynchronous read in flight.
+    /* One counter per layer, so a re-read has a NAME. The aggregate byte count says the
+     * ring read 13.7% more than the walk needed and says nothing about which layers, and
+     * every attempt to infer that from the pinned set has been a guess. See the note above
+     * k3_trunk_report. */
+    tr->reads_of = (uint32_t *)calloc((size_t)tr->n_layers, sizeof(uint32_t));
+    if (!tr->reads_of) return -1;
+
+    /* Ring slots: the layer being computed on, plus the reads in flight behind it.
      *
-     * This is a REQUEST, not a guarantee. The second slot costs a full slot's worth of
-     * memory, which at the floor is 2.37 GB, and the budget the caller asked for has to
-     * come first: measured on the released checkpoint, taking the second slot
-     * unconditionally moved the laptop preset from 8.78 GB to 11.12 GB peak RSS, a 27%
-     * overshoot of a 3.0 GB trunk budget, and left the printed memory plan understating
-     * the real figure. So it is granted only when it fits, and reported when it does not.
-     * A single slot is exactly what this file did before the asynchronous reader existed,
-     * so falling back is always safe; it costs speed, not correctness. */
-    const int RING_WANT = 2;
+     * This is a REQUEST, not a guarantee. Each slot costs a full slot's worth of memory,
+     * which at the floor is 2.37 GB, and the budget the caller asked for has to come
+     * first: measured on the released checkpoint, taking the second slot unconditionally
+     * moved the laptop preset from 8.78 GB to 11.12 GB peak RSS, a 27% overshoot of a
+     * 3.0 GB trunk budget, and left the printed memory plan understating the real figure.
+     * So slots are granted only when they fit, and reported when they are not. A single
+     * slot is exactly what this file did before the asynchronous reader existed, so
+     * falling back is always safe; it costs speed, not correctness.
+     *
+     * WHY MORE THAN TWO IS WORTH OFFERING. Two slots overlap one read with one layer's
+     * compute, which is enough only while the two take about the same time. They do not:
+     * a trunk read is 62.40 s of a 135.8 s token on the reference machine, so the reader
+     * spends part of every layer idle waiting to be allowed to start the next one. A
+     * third slot lets it run a layer further ahead and keeps the device continuously
+     * busy. It is not free -- another 2.37 GB -- which is why it is a dial rather than a
+     * default, and why the default stays at 2. */
+    int RING_WANT = ring_want > 0 ? ring_want : 2;
+    if (RING_WANT > K3_TRUNK_MAXRING) RING_WANT = K3_TRUNK_MAXRING;
+    if (RING_WANT < 1) RING_WANT = 1;
     int RING = RING_WANT;
 
-    /* Size the ring from the layers that will actually STREAM through it.
+    /* Size the ring from the layers that will actually STREAM through it, and choose
+     * which layers to pin LARGEST FIRST.
      *
-     * Pinning is a PREFIX: layers 0..npin-1 are held resident and never touch the ring,
-     * so only npin..n_layers-1 ever occupy a slot. Sizing the slot from the maximum over
-     * ALL layers therefore reserves room for layer 0 -- which at 2.34 GB is the largest
-     * in the model, being the only dense one with a 33792-wide MLP, and which prefix
-     * pinning pins FIRST whenever anything is pinned at all. That wasted about 1.17 GB
-     * for nothing at every budget above the floor.
+     * Pinning used to be a PREFIX, layers 0..npin-1, and that interacted badly with the
+     * ring in two compounding ways. The ring slot is uniform and must hold the largest
+     * layer that still streams, so it was sized from the maximum over all UNPINNED
+     * layers -- and prefix pinning takes layer 0 first, which at 2.34 GB is the largest
+     * in the model (the only dense one, with a 33792-wide MLP). So the moment anything
+     * was pinned at all, the budget was paying for a slot sized to a layer that no
+     * longer used it, about 1.17 GB wasted at every budget above the floor.
      *
-     * Ring size and pin count are mutually dependent: a smaller ring frees budget, which
-     * pins more layers, which can shrink the ring again. Iterate to a fixed point. It
-     * converges in two or three passes and is monotone, so the loop is bounded. At the
-     * floor, where npin is 0, this correctly changes nothing: every layer streams and the
-     * ring must still hold the biggest of them. */
+     * Largest first fixes both halves at once. For read volume the choice is neutral:
+     * any pinned set totalling B bytes avoids exactly B bytes per token. For the ring it
+     * is decisive, because dropping the biggest survivor is what shrinks the slot.
+     *
+     * The selection is greedy over layers sorted by size descending, and it keeps trying
+     * SMALLER layers after a large one no longer fits -- so the budget is filled, not
+     * merely walked. Ring size and pinned set remain mutually dependent (a smaller slot
+     * frees budget, which pins more, which can shrink the slot again), so the whole
+     * thing iterates to a fixed point. Selection is monotone in available budget, so the
+     * loop converges rather than oscillating; it is bounded anyway.
+     *
+     * K3_PIN_PREFIX=1 restores the old order for an A/B on one binary. */
+    const int pin_prefix = getenv("K3_PIN_PREFIX") != NULL;
+    int *order = (int *)malloc((size_t)tr->n_layers * sizeof(int));
+    unsigned char *chosen = (unsigned char *)calloc((size_t)tr->n_layers, 1);
+    if (!order || !chosen) { free(order); free(chosen); return -1; }
+    for (int i = 0; i < tr->n_layers; i++) order[i] = i;
+    if (!pin_prefix) {
+        /* Insertion sort by nbytes DESCENDING, ties broken by layer index ascending so
+         * the selection is deterministic and a rerun pins the same set. 93 elements. */
+        for (int i = 1; i < tr->n_layers; i++) {
+            const int t = order[i];
+            int j = i - 1;
+            while (j >= 0 && tr->lay[order[j]].nbytes < tr->lay[t].nbytes) {
+                order[j + 1] = order[j]; j--;
+            }
+            order[j + 1] = t;
+        }
+    }
+
     int64_t ring_slot = 0, spent = 0;
     int npin = 0;
-    for (int pass = 0; pass < 4; pass++) {
+    for (int pass = 0; pass < 8; pass++) {
+        /* Largest UNPINNED layer: what the ring slot has to hold. */
         int64_t big = 0;
-        for (int i = npin; i < tr->n_layers; i++)
-            if (tr->lay[i].nbytes > big) big = tr->lay[i].nbytes;
+        for (int i = 0; i < tr->n_layers; i++)
+            if (!chosen[i] && tr->lay[i].nbytes > big) big = tr->lay[i].nbytes;
         if (big == 0) big = tr->lay[tr->n_layers - 1].nbytes;   /* all pinned */
         int64_t rs = (big + K3_TRUNK_ALIGN - 1) & ~(int64_t)(K3_TRUNK_ALIGN - 1);
         rs += (int64_t)widen;
         rs = (rs + 4095) & ~(int64_t)4095;
 
-        /* The ring itself must fit the budget before any layer is pinned. The loop below
-         * only ever tested ADDITIONAL pinned layers against it, so RING * rs was spent
-         * whether or not it fitted. Drop to one slot rather than overshoot. */
+        /* The ring itself must fit the budget before any layer is pinned. Drop to one
+         * slot rather than overshoot. */
         RING = RING_WANT;
         while (RING > 1 && (int64_t)RING * rs > budget_bytes) RING--;
 
         int64_t sp = (int64_t)RING * rs;
         int np = 0;
-        while (np < tr->n_layers) {
-            const int64_t need = tr->lay[np].nbytes + (int64_t)widen;
-            if (sp + need > budget_bytes) break;
+        memset(chosen, 0, (size_t)tr->n_layers);
+        for (int i = 0; i < tr->n_layers; i++) {
+            const int L = order[i];
+            const int64_t need = tr->lay[L].nbytes + (int64_t)widen;
+            if (sp + need > budget_bytes) {
+                /* A prefix pin stops at the first layer that does not fit, because the
+                 * order is the walk order and skipping one would leave a hole in it.
+                 * Largest-first has no such constraint: keep going and take the smaller
+                 * ones that still fit. */
+                if (pin_prefix) break;
+                continue;
+            }
             sp += need;
+            chosen[L] = 1;
             np++;
         }
-        if (np >= tr->n_layers) np = tr->n_layers;
         if (rs == ring_slot && np == npin) { ring_slot = rs; spent = sp; break; }
         ring_slot = rs; npin = np; spent = sp;
     }
@@ -253,17 +338,26 @@ int k3_trunk_open(K3Trunk *tr, const char *dir, const K3Cfg *c, int64_t budget_b
     tr->nslot = RING;
     tr->slot_bytes = ring_slot;
 
+    tr->pin_of = (int32_t *)malloc((size_t)tr->n_layers * sizeof(int32_t));
     tr->pin = (unsigned char **)calloc((size_t)(npin ? npin : 1), sizeof(unsigned char *));
-    if (!tr->pin) return -1;
-    for (int i = 0; i < npin; i++) {
-        const size_t need = (size_t)((tr->lay[i].nbytes + K3_TRUNK_ALIGN - 1)
-                                     & ~(int64_t)(K3_TRUNK_ALIGN - 1)) + widen;
-        if (k3_alloc_direct((void **)&tr->pin[i], need) != 0) {
-            fprintf(stderr, "k3_trunk: cannot allocate %.2f GB for pinned layer %d\n",
-                    (double)need / 1e9, i);
-            return -1;
+    if (!tr->pin || !tr->pin_of) { free(order); free(chosen); return -1; }
+    for (int i = 0; i < tr->n_layers; i++) tr->pin_of[i] = -1;
+    {
+        int k = 0;
+        for (int L = 0; L < tr->n_layers && k < npin; L++) {
+            if (!chosen[L]) continue;
+            const size_t need = (size_t)((tr->lay[L].nbytes + K3_TRUNK_ALIGN - 1)
+                                         & ~(int64_t)(K3_TRUNK_ALIGN - 1)) + widen;
+            if (k3_alloc_direct((void **)&tr->pin[k], need) != 0) {
+                fprintf(stderr, "k3_trunk: cannot allocate %.2f GB for pinned layer %d\n",
+                        (double)need / 1e9, L);
+                free(order); free(chosen);
+                return -1;
+            }
+            tr->pin_of[L] = k++;
         }
     }
+    free(order); free(chosen);
     if (k3_alloc_direct((void **)&tr->arena, (size_t)RING * (size_t)ring_slot) != 0) {
         fprintf(stderr, "k3_trunk: cannot allocate the %.2f GB streaming ring\n",
                 (double)RING * ring_slot / 1e9);
@@ -273,12 +367,14 @@ int k3_trunk_open(K3Trunk *tr, const char *dir, const K3Cfg *c, int64_t budget_b
     for (int i = 0; i < RING; i++) tr->layer_of[i] = -1;
     tr->widen_bytes = (int64_t)widen;
 
-    /* The reader is started ONLY when there are at least two slots, and this is a
-     * correctness requirement rather than an optimisation.
+    /* The io state always exists, because its mutex is what serialises the slot
+     * bookkeeping even in the single-threaded case. The reader THREAD is started only
+     * when there are at least two slots, and that is a correctness requirement rather
+     * than an optimisation.
      *
-     * k3_trunk_prefetch claims tr->ring for the incoming layer. With one slot, tr->ring
-     * is necessarily the slot k3_trunk_bind just returned to the caller, so the worker
-     * preads layer L+1 straight over layer L's bytes while the caller is still computing
+     * k3_trunk_prefetch claims a slot for the incoming layer. With one slot that is
+     * necessarily the slot k3_trunk_bind just returned to the caller, so the worker would
+     * pread layer L+1 straight over layer L's bytes while the caller is still computing
      * on them. Nothing detects it: the read succeeds, no bound pointer changes, and the
      * run completes and emits fluent, wrong tokens.
      *
@@ -286,26 +382,39 @@ int k3_trunk_open(K3Trunk *tr, const char *dir, const K3Cfg *c, int64_t budget_b
      * prompt that gives 17374 20829 10 427 414 1008 606 142957 instead produced
      * 32609 2329 146429 2539 11 152834 44449 7569, with no diagnostic of any kind.
      *
-     * With io_state NULL, trunk_io_wait returns 0 and k3_trunk_prefetch returns
-     * immediately, which is exactly the synchronous path this file had before the reader
-     * existed. */
-    if (RING >= 2) {
+     * `held` now enforces that invariant directly rather than leaving it to arithmetic,
+     * so the single-slot case would in fact refuse to evict -- but the reader is still
+     * withheld, because a ring that can never accept a prefetch has nothing for it to do
+     * and would simply block. With running == 0, k3_trunk_prefetch returns immediately,
+     * which is exactly the synchronous path this file had before the reader existed. */
+    {
         K3TrunkIO *io = (K3TrunkIO *)calloc(1, sizeof *io);
         if (!io) return -1;
         io->tr = tr;
+        io->held = -1;
+        for (int i = 0; i < K3_TRUNK_MAXRING; i++) io->pending[i] = -1;
         pthread_mutex_init(&io->mu, NULL);
-        pthread_cond_init(&io->cv, NULL);
+        pthread_cond_init(&io->cv_work, NULL);
+        pthread_cond_init(&io->cv_done, NULL);
         tr->io_state = io;
-        if (pthread_create(&io->thread, NULL, trunk_io_main, io) != 0) {
-            fprintf(stderr, "k3_trunk: cannot start asynchronous reader\n");
-            pthread_cond_destroy(&io->cv);
-            pthread_mutex_destroy(&io->mu);
-            free(io);
-            tr->io_state = NULL;
-            return -1;
+        /* One ring per reading thread: an io_uring is not safe to drive from two
+         * threads at once, and the whole point is that both can have reads in flight. */
+        tr->uring = k3_uring_new(16);
+        if (RING >= 2) {
+            io->ur = k3_uring_new(16);
+            if (pthread_create(&io->thread, NULL, trunk_io_main, io) != 0) {
+                fprintf(stderr, "k3_trunk: cannot start asynchronous reader\n");
+                k3_uring_free(io->ur);
+                pthread_cond_destroy(&io->cv_work);
+                pthread_cond_destroy(&io->cv_done);
+                pthread_mutex_destroy(&io->mu);
+                free(io);
+                tr->io_state = NULL;
+                return -1;
+            }
+            tr->reader_started = 1;
+            io->running = 1;
         }
-    } else {
-        tr->io_state = NULL;
     }
 
     printf("trunk stream: %.2f GB packed, %d/%d layers PINNED (%.2f GB), "
@@ -313,18 +422,44 @@ int k3_trunk_open(K3Trunk *tr, const char *dir, const K3Cfg *c, int64_t budget_b
            (double)total / 1e9, npin, tr->n_layers,
            (double)(spent - (int64_t)RING * ring_slot) / 1e9,
            RING, (double)ring_slot / 1e9);
-    printf("              reads use %s\n",
-           tr->direct ? "O_DIRECT (page cache bypassed)" : "buffered I/O");
+    {   /* Say which layers were pinned and what it bought, because "10/93 pinned" reads
+         * the same whichever ten they were and the ring slot is the whole point. */
+        int64_t biggest = 0, biggest_unpinned = 0;
+        for (int i = 0; i < tr->n_layers; i++) {
+            if (tr->lay[i].nbytes > biggest) biggest = tr->lay[i].nbytes;
+            if (tr->pin_of[i] < 0 && tr->lay[i].nbytes > biggest_unpinned)
+                biggest_unpinned = tr->lay[i].nbytes;
+        }
+        printf("              pinned %s; the ring slot is sized to the largest UNPINNED "
+               "layer (%.2f GB\n              of a %.2f GB maximum)\n",
+               npin == 0 ? "nothing"
+                         : (getenv("K3_PIN_PREFIX") ? "as a PREFIX (K3_PIN_PREFIX)"
+                                                    : "LARGEST FIRST"),
+               (double)biggest_unpinned / 1e9, (double)biggest / 1e9);
+    }
+    printf("              reads use %s, %s\n",
+           tr->direct ? "O_DIRECT (page cache bypassed)" : "buffered I/O",
+           tr->uring
+             ? (k3_uring_sqpoll((const K3Uring *)tr->uring)
+                  ? "io_uring with SQPOLL" : "io_uring")
+             : "pread at queue depth 1");
+    if (tr->uring)
+        printf("              up to %u requests in flight per layer read: an NVMe device "
+               "does not reach\n              its rated bandwidth at depth one\n",
+               k3_uring_depth((const K3Uring *)tr->uring));
     if (RING < RING_WANT)
-        printf("              ring held at %d slot: a second slot needs %.2f GB and the "
-               "trunk budget is %.2f GB,\n"
-               "              so reads are NOT overlapped with compute. Raise --trunk-gb "
-               "above %.2f GB to enable it.\n",
-               RING, (double)RING_WANT * ring_slot / 1e9,
+        printf("              ring held at %d slot%s: %d slots need %.2f GB and the "
+               "trunk budget is %.2f GB.\n"
+               "              %s Raise --trunk-gb above %.2f GB for the "
+               "%d asked for.\n",
+               RING, RING == 1 ? "" : "s", RING_WANT,
+               (double)RING_WANT * ring_slot / 1e9,
                (double)budget_bytes / 1e9,
-               (double)RING_WANT * ring_slot / 1e9);
+               RING == 1 ? "Reads are NOT overlapped with compute."
+                         : "Fewer reads stay in flight.",
+               (double)RING_WANT * ring_slot / 1e9, RING_WANT);
     printf("              deterministic hit rate %.1f%% (a cyclic scan defeats LRU, so "
-           "a pinned prefix is used instead)\n", 100.0 * npin / tr->n_layers);
+           "a pinned SET is used instead)\n", 100.0 * npin / tr->n_layers);
     return 0;
 bad:
     free(txt);
@@ -335,18 +470,24 @@ void k3_trunk_close(K3Trunk *tr)
 {
     K3TrunkIO *io = (K3TrunkIO *)tr->io_state;
     if (io) {
-        pthread_mutex_lock(&io->mu);
-        io->stop = 1;
-        pthread_cond_signal(&io->cv);
-        pthread_mutex_unlock(&io->mu);
-        pthread_join(io->thread, NULL);
-        pthread_cond_destroy(&io->cv);
+        if (io->running) {
+            pthread_mutex_lock(&io->mu);
+            io->stop = 1;
+            pthread_cond_broadcast(&io->cv_work);
+            pthread_mutex_unlock(&io->mu);
+            pthread_join(io->thread, NULL);
+        }
+        k3_uring_free(io->ur);
+        pthread_cond_destroy(&io->cv_work);
+        pthread_cond_destroy(&io->cv_done);
         pthread_mutex_destroy(&io->mu);
         free(io);
     }
+    k3_uring_free((K3Uring *)tr->uring);
     if (tr->fd >= 0) close(tr->fd);
     if (tr->pin) { for (int i = 0; i < tr->npin; i++) k3_aligned_free(tr->pin[i]); free(tr->pin); }
-    k3_aligned_free(tr->arena); free(tr->layer_of); free(tr->slot_of);
+    k3_aligned_free(tr->arena); free(tr->layer_of); free(tr->slot_of); free(tr->pin_of);
+    free(tr->reads_of);
     if (tr->lay) { for (int i = 0; i < tr->n_layers; i++) free(tr->lay[i].t); free(tr->lay); }
     free(tr->json_arena);   /* every K3TrunkTensor.name points into this */
     memset(tr, 0, sizeof *tr);
@@ -386,113 +527,259 @@ static int k3_alloc_direct(void **out, size_t bytes)
     return 0;
 }
 
-static int load_run(K3Trunk *tr, int L, unsigned char *dst)
+/* Read one layer's run. `ur` may be NULL, in which case this is the pread loop it has
+ * always been; when present the transfer is split across the ring so several requests
+ * are outstanding at once. The two are interchangeable byte for byte.
+ *
+ * Timing and byte counts come back through out-parameters rather than being added to
+ * the K3Trunk here: two threads call this concurrently now, and += on a shared double is
+ * a data race whose symptom is a plausible-looking throughput figure. */
+static int load_run_to(K3Trunk *tr, int L, unsigned char *dst, K3Uring *ur,
+                       double *secs, int64_t *bytes)
 {
     const K3TrunkLayer *lay = &tr->lay[L];
     const double t0 = now_s();
     int64_t got = 0;
+
+    if (ur) {
+        got = k3_uring_read(ur, tr->fd, dst, lay->nbytes, lay->file_off);
+        if (got == lay->nbytes) {
+            *secs = now_s() - t0;
+            *bytes = got;
+            return 0;
+        }
+        got = 0;   /* io_uring refused this transfer: fall through to pread */
+    }
     while (got < lay->nbytes) {
         const int64_t remain = lay->nbytes - got;
         const int64_t req = remain < K3_PREAD_MAX ? remain : K3_PREAD_MAX;
         ssize_t r = pread(tr->fd, dst + got, (size_t)req, (off_t)(lay->file_off + got));
-        if (r <= 0) { fprintf(stderr, "k3_trunk: short read on layer %d\n", L); return -1; }
+        if (r <= 0) {
+            fprintf(stderr, "k3_trunk: short read on layer %d\n", L);
+            *secs = now_s() - t0; *bytes = got;
+            return -1;
+        }
         got += r;
     }
-    tr->load_seconds += now_s() - t0;
-    tr->bytes_read += (uint64_t)got;
+    *secs = now_s() - t0;
+    *bytes = got;
     return 0;
+}
+
+/* Fold one completed read into the shared counters. Caller holds io->mu.
+ *
+ * L is counted even when the read FAILED: the bytes still crossed the device, and the
+ * per-layer counter exists to explain the byte total rather than the token stream. */
+static void tally_locked(K3Trunk *tr, int L, double secs, int64_t bytes)
+{
+    tr->load_seconds += secs;
+    tr->bytes_read += (uint64_t)bytes;
+    if (L >= 0 && L < tr->n_layers && tr->reads_of) tr->reads_of[L]++;
+}
+
+/* Is this slot holding a layer the walk is ABOUT to need?
+ *
+ * The third protection, after "being read into" and "in use by the caller". A layer the
+ * prefetcher already fetched and published, but that the walk has not reached yet, is
+ * neither of those -- so a claim for a further-ahead layer would evict it, and the walk
+ * would arrive a moment later and read it AGAIN. That is invisible in the token stream
+ * and shows up only as bytes: measured on the synthetic trunk at ring depth 2, 6.23 MB
+ * read against a 4.72 MB bound, and on the released checkpoint as 491 GB read from a
+ * 29.81 GB trunk over ten passes.
+ *
+ * It bites hardest immediately after a PINNED layer, because those hold no ring slot, so
+ * `held` is -1 and every slot looks claimable.
+ *
+ * The window is bounded by the ring itself: a layer the prefetcher could not have reached
+ * on this pass is stale from the PREVIOUS one -- layers 91 and 92 still sitting there when
+ * the walk has wrapped to layer 0 -- and must stay evictable, or a two-slot ring would
+ * deadlock at the start of every pass.
+ *
+ * WHAT "COULD NOT HAVE REACHED" MEANS, and why the obvious form of it is wrong. The first
+ * version measured INDEX distance: layer L is protected when walk < L <= walk + nslot.
+ * That is only right when nothing is pinned. k3_trunk_prefetch SKIPS pinned layers while
+ * scanning rather than stopping at them, so with pinned layers ahead it queues something
+ * many indices out that is only a few SLOTS out -- and the index window then declared it
+ * stale and let the next claim evict it, seconds before the walk arrived.
+ *
+ * So count the layers that would actually TAKE a slot. A ring of nslot slots can hold at
+ * most nslot streaming layers ahead of the walk, whatever their indices, which makes this
+ * exactly the old test whenever nothing is pinned and a strictly wider one otherwise.
+ *
+ * Found by sweeping the shape space rather than by reasoning about it: the two hand-built
+ * fixtures in tests/unit/test_trunk.c both accepted the index form, and a 93-layer sweep
+ * across budgets and ring depths failed 40 of 100 cases against it, worst at 56 pinned
+ * layers with a four-slot ring. Two arguments from mechanism about which shape escaped
+ * were made before that sweep existed, and both were wrong. */
+static int upcoming(const K3Trunk *tr, int s)
+{
+    const int L = tr->layer_of[s];
+    if (L <= tr->walk) return 0;
+    int ahead = 0;
+    for (int n = tr->walk + 1; n < L; n++)
+        if (tr->pin_of[n] < 0 && ++ahead >= tr->nslot) return 0;
+    return 1;
+}
+
+/* Take a ring slot for layer L, evicting whatever it held. Caller holds io->mu.
+ * Returns -1 when every slot is either being read into or in use by the caller, which
+ * is a normal transient rather than an error: wait on cv_done and retry. */
+static int claim_slot_locked(K3Trunk *tr, K3TrunkIO *io, int L)
+{
+    for (int i = 0; i < tr->nslot; i++) {
+        const int s = (tr->ring + i) % tr->nslot;
+        if (io->pending[s] >= 0) continue;      /* a read is landing in it  */
+        if (s == io->held) continue;            /* the caller is reading it */
+        if (upcoming(tr, s)) continue;          /* the walk needs it next   */
+        tr->ring = (s + 1) % tr->nslot;
+        if (tr->layer_of[s] >= 0) tr->slot_of[tr->layer_of[s]] = -1;
+        tr->layer_of[s] = -1;                   /* EMPTY before the read, not after */
+        io->pending[s] = L;
+        return s;
+    }
+    return -1;
+}
+
+static int pending_slot_locked(const K3Trunk *tr, const K3TrunkIO *io, int L)
+{
+    for (int s = 0; s < tr->nslot; s++) if (io->pending[s] == L) return s;
+    return -1;
 }
 
 static void *trunk_io_main(void *arg)
 {
     K3TrunkIO *io = (K3TrunkIO *)arg;
+    K3Trunk *tr = io->tr;
     for (;;) {
         pthread_mutex_lock(&io->mu);
-        while (!io->busy && !io->stop)
-            pthread_cond_wait(&io->cv, &io->mu);
-        if (io->stop) {
-            pthread_mutex_unlock(&io->mu);
-            return NULL;
-        }
-        const int L = io->layer;
-        const int slot = io->slot;
-        K3Trunk *tr = io->tr;
+        while (io->nq == 0 && !io->stop)
+            pthread_cond_wait(&io->cv_work, &io->mu);
+        if (io->stop) { pthread_mutex_unlock(&io->mu); return NULL; }
+        const int L = io->q[0], slot = io->qslot[0];
+        for (int i = 1; i < io->nq; i++) { io->q[i - 1] = io->q[i]; io->qslot[i - 1] = io->qslot[i]; }
+        io->nq--;
         pthread_mutex_unlock(&io->mu);
 
-        const int rc = load_run(tr, L, tr->arena + (size_t)slot * tr->slot_bytes);
+        double secs = 0.0; int64_t bytes = 0;
+        const int rc = load_run_to(tr, L, tr->arena + (size_t)slot * tr->slot_bytes,
+                                   io->ur, &secs, &bytes);
 
         pthread_mutex_lock(&io->mu);
-        io->result = rc;
-        io->done = 1;
-        io->busy = 0;
-        pthread_cond_broadcast(&io->cv);
+        tally_locked(tr, L, secs, bytes);
+        io->pending[slot] = -1;
+        if (rc == 0) {
+            /* Publish ONLY after the read succeeded. Registering the layer up front
+             * would let a failed read serve a slot that claims to hold weights it does
+             * not, and the next bind would count it as a hit and multiply garbage.
+             *
+             * Deliberately NOT counted as a miss here. hits and misses are per BIND, and
+             * a bind that waits for a prefetch is one bind, not one miss plus one hit;
+             * k3_trunk_bind owns that classification so the two always sum to the bind
+             * count. Counting here as well inflated the hit rate by the prefetch rate,
+             * which is precisely the number the rate is meant to expose. */
+            tr->layer_of[slot] = L;
+            tr->slot_of[L] = slot;
+        }
+        pthread_cond_broadcast(&io->cv_done);
         pthread_mutex_unlock(&io->mu);
     }
 }
 
-static int trunk_io_wait(K3Trunk *tr, int L)
+int k3_trunk_fetch(K3Trunk *tr, int L, unsigned char **out)
 {
+    if (L < 0 || L >= tr->n_layers) return -1;
+    unsigned char *base;
     K3TrunkIO *io = (K3TrunkIO *)tr->io_state;
-    if (!io) return 0;
+
+    /* Where the walk is. Everything at or behind this has been consumed and its slot may
+     * be reused; a short way ahead of it is what the prefetcher has in flight and must
+     * not lose. Updated under the lock because claim_slot_locked reads it. */
     pthread_mutex_lock(&io->mu);
-    if ((io->busy || io->done) && io->layer == L) {
-        while (!io->done && !io->stop)
-            pthread_cond_wait(&io->cv, &io->mu);
-        const int rc = io->result;
-        const int slot = io->slot;
-        if (!io->stop && rc == 0) {
-            tr->layer_of[slot] = L;
-            tr->slot_of[L] = slot;
-            tr->misses++;
-        }
-        io->done = 0;
-        pthread_mutex_unlock(&io->mu);
-        return rc == 0 ? 1 : -1;
-    }
+    tr->walk = L;
     pthread_mutex_unlock(&io->mu);
+
+    if (tr->pin_of[L] >= 0) {
+        base = tr->pin[tr->pin_of[L]];
+        if (tr->slot_of[L] < 0) {            /* first touch: load once, keep forever */
+            double secs = 0.0; int64_t bytes = 0;
+            /* tr->uring, NOT io->ur. An io_uring is a shared-memory protocol between one
+             * submitter and the kernel; driving one ring from two threads interleaves
+             * their head and tail updates, and the symptom is not corruption but a HANG:
+             * one thread reaps the other's completion, and the other waits forever for a
+             * completion that has already been consumed. That is exactly what handing
+             * the reader's ring to the main thread here did, and it reproduced as an
+             * intermittent stall in tests/unit/test_trunk.c at ring depths 2 and 3. */
+            const int rc = load_run_to(tr, L, base, tr->uring, &secs, &bytes);
+            pthread_mutex_lock(&io->mu);
+            tally_locked(tr, L, secs, bytes);
+            if (rc == 0) { tr->slot_of[L] = L; tr->misses++; }
+            pthread_mutex_unlock(&io->mu);
+            if (rc != 0) return -1;
+        } else {
+            tr->hits++;
+        }
+        pthread_mutex_lock(&io->mu);
+        io->held = -1;                       /* no ring slot is in use */
+        pthread_cond_broadcast(&io->cv_done);
+        pthread_mutex_unlock(&io->mu);
+    } else {
+        int slot;
+        pthread_mutex_lock(&io->mu);
+        io->held = -1;    /* release the previous layer's slot before asking for one */
+        pthread_cond_broadcast(&io->cv_done);
+        /* Classify this bind ONCE, on the first look. Resident already means no bytes
+         * moved for it; anything else means bytes did, whether this thread read them or
+         * it waited for the reader to finish. hits + misses therefore equals the bind
+         * count, which is what makes the printed rate mean anything. */
+        int first = 1;
+        for (;;) {
+            slot = tr->slot_of[L];
+            if (slot >= 0) { if (first) tr->hits++; break; }
+            if (first) { tr->misses++; first = 0; }
+            const int pend = pending_slot_locked(tr, io, L);
+            if (pend >= 0) {                 /* the reader is already fetching it */
+                pthread_cond_wait(&io->cv_done, &io->mu);
+                continue;
+            }
+            slot = claim_slot_locked(tr, io, L);
+            if (slot >= 0) {                 /* fetch it on this thread */
+                pthread_mutex_unlock(&io->mu);
+                double secs = 0.0; int64_t bytes = 0;
+                const int rc = load_run_to(tr, L,
+                                           tr->arena + (size_t)slot * tr->slot_bytes,
+                                           tr->uring, &secs, &bytes);
+                pthread_mutex_lock(&io->mu);
+                tally_locked(tr, L, secs, bytes);
+                io->pending[slot] = -1;
+                if (rc == 0) { tr->layer_of[slot] = L; tr->slot_of[L] = slot; }
+                pthread_cond_broadcast(&io->cv_done);
+                if (rc != 0) {
+                    /* A bind that fails moved no usable bytes and published nothing,
+                     * so it is not a cache event: hits + misses counts COMPLETED binds,
+                     * and test_trunk's truncated case holds the reader to that. The
+                     * miss was charged on the first look above; take it back. */
+                    tr->misses--;
+                    pthread_mutex_unlock(&io->mu);
+                    return -1;
+                }
+                break;
+            }
+            pthread_cond_wait(&io->cv_done, &io->mu);   /* every slot is busy */
+        }
+        io->held = slot;    /* nothing may evict this until the next bind */
+        pthread_mutex_unlock(&io->mu);
+        base = tr->arena + (size_t)slot * tr->slot_bytes;
+    }
+    *out = base;
     return 0;
 }
 
 int k3_trunk_bind(K3Trunk *tr, const K3Cfg *c, int L, K3LayerBind *b)
 {
-    if (L < 0 || L >= tr->n_layers) return -1;
     const double t_bind0 = now_s();
     k3_trunk_binds++;
-    unsigned char *base;
-
-    if (L < tr->npin) {
-        base = tr->pin[L];
-        if (tr->slot_of[L] < 0) {            /* first touch: load once, keep forever */
-            if (load_run(tr, L, base) != 0) return -1;
-            tr->slot_of[L] = L;
-            tr->misses++;
-        } else {
-            tr->hits++;
-        }
-    } else {
-        int slot = -1;
-        const int prefetched = trunk_io_wait(tr, L);
-        if (prefetched < 0) return -1;
-        if (prefetched > 0) {
-            slot = tr->slot_of[L];
-        } else {
-            for (int i = 0; i < tr->nslot; i++)
-                if (tr->layer_of[i] == L) { slot = i; break; }
-            if (slot >= 0) {
-                tr->hits++;
-            } else {
-                slot = tr->ring;
-                tr->ring = (tr->ring + 1) % tr->nslot;
-                if (tr->layer_of[slot] >= 0) tr->slot_of[tr->layer_of[slot]] = -1;
-                /* Mark the slot EMPTY before reading into it, not after. */
-                tr->layer_of[slot] = -1;
-                if (load_run(tr, L, tr->arena + (size_t)slot * tr->slot_bytes) != 0) return -1;
-                tr->layer_of[slot] = L;
-                tr->misses++;
-            }
-        }
-        base = tr->arena + (size_t)slot * tr->slot_bytes;
-    }
+    unsigned char *base = NULL;
+    if (k3_trunk_fetch(tr, L, &base) != 0) return -1;
 
     Finder f; f.L = &tr->lay[L];
     K3MemSrc src; src.find = find_in_layer; src.ctx = &f;
@@ -508,27 +795,36 @@ int k3_trunk_bind(K3Trunk *tr, const K3Cfg *c, int L, K3LayerBind *b)
     return rc;
 }
 
+/* Queue the upcoming layers, as many as the ring can hold at once.
+ *
+ * The walk order is fixed 0..92 on every token, so there is nothing to predict and a
+ * hint is never wrong -- which is what makes running SEVERAL layers ahead safe rather
+ * than speculative. Depth is bounded by the ring itself: claim_slot_locked refuses the
+ * slot in use and any slot already being read into, so a ring of R slots can carry at
+ * most R-1 outstanding reads and this loop simply stops when it runs out.
+ *
+ * Pinned and already-resident layers are SKIPPED rather than ending the scan, so a run
+ * of pinned layers ahead does not stall the prefetcher: it looks past them to the next
+ * layer that actually needs reading. */
 void k3_trunk_prefetch(K3Trunk *tr, int L)
 {
-    if (L < 0 || L >= tr->n_layers || L < tr->npin) return;
-    for (int i = 0; i < tr->nslot; i++) if (tr->layer_of[i] == L) return;
-
     K3TrunkIO *io = (K3TrunkIO *)tr->io_state;
-    if (!io) return;
+    if (!io || !io->running || L < 0) return;
+
     pthread_mutex_lock(&io->mu);
-    if (io->busy || tr->slot_of[L] >= 0) {
-        pthread_mutex_unlock(&io->mu);
-        return;
+    int queued = 0;
+    for (int n = L; n < tr->n_layers && io->nq < tr->nslot; n++) {
+        if (tr->pin_of[n] >= 0) continue;
+        if (tr->slot_of[n] >= 0) continue;
+        if (pending_slot_locked(tr, io, n) >= 0) continue;
+        const int slot = claim_slot_locked(tr, io, n);
+        if (slot < 0) break;                 /* no free slot: the ring is full */
+        io->q[io->nq] = n;
+        io->qslot[io->nq] = slot;
+        io->nq++;
+        queued++;
     }
-    const int slot = tr->ring;
-    tr->ring = (tr->ring + 1) % tr->nslot;
-    if (tr->layer_of[slot] >= 0) tr->slot_of[tr->layer_of[slot]] = -1;
-    tr->layer_of[slot] = -1;
-    io->layer = L;
-    io->slot = slot;
-    io->done = 0;
-    io->busy = 1;
-    pthread_cond_signal(&io->cv);
+    if (queued) pthread_cond_signal(&io->cv_work);
     pthread_mutex_unlock(&io->mu);
 }
 
@@ -543,6 +839,44 @@ void k3_trunk_report(const K3Trunk *tr, const char *label)
     printf("  read %.2f GB in %.2f s (%.0f MB/s)\n",
            (double)tr->bytes_read / 1e9, tr->load_seconds,
            tr->load_seconds > 0 ? (double)tr->bytes_read / 1e6 / tr->load_seconds : 0.0);
+
+    /* WHAT THE WALK ACTUALLY OWED, and which layers went over it.
+     *
+     * The walk is fixed: every pass touches every layer once, so a pinned layer owes ONE
+     * read for the whole run and a streaming layer owes one per pass. Anything above that
+     * is a slot evicted between the prefetch that filled it and the walk that needed it --
+     * invisible in the token stream, visible only here.
+     *
+     * This is printed because the aggregate was not enough to act on. A measured run came
+     * in 13.7% above this bound and two separate explanations were argued from the pinned
+     * set's shape, both without evidence. A per-layer count settles it by naming them. */
+    if (tr->reads_of && n > 0) {
+        const int passes = (int)((n + (uint64_t)tr->n_layers - 1) / (uint64_t)tr->n_layers);
+        int64_t owed = 0, got = 0, over_layers = 0;
+        for (int L = 0; L < tr->n_layers; L++) {
+            const int want = (tr->pin_of[L] >= 0) ? 1 : passes;
+            owed += (int64_t)want;
+            got  += (int64_t)tr->reads_of[L];
+            if ((int)tr->reads_of[L] > want) over_layers++;
+        }
+        printf("  reads %lld against %lld the walk owes (%d passes, %d pinned)",
+               (long long)got, (long long)owed, passes, tr->npin);
+        if (over_layers == 0) {
+            printf("  -- exact\n");
+        } else {
+            printf("\n  %lld layer(s) read more than the walk needed:", (long long)over_layers);
+            int shown = 0;
+            for (int L = 0; L < tr->n_layers && shown < 12; L++) {
+                const int want = (tr->pin_of[L] >= 0) ? 1 : passes;
+                if ((int)tr->reads_of[L] > want) {
+                    printf(" %d(%ux%s)", L, tr->reads_of[L], tr->pin_of[L] >= 0 ? ",pin" : "");
+                    shown++;
+                }
+            }
+            if (over_layers > shown) printf(" ...");
+            printf("\n");
+        }
+    }
     /* The rate above is a DEVICE rate: load_seconds brackets the pread loop alone. The
      * breakdown below is the wall clock actually spent inside k3_trunk_bind, so the
      * difference between them is per-bind overhead rather than disk time.

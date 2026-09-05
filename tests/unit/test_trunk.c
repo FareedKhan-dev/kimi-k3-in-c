@@ -345,13 +345,16 @@ static int gen_fixture(const char *dir)
 static int test_one_slot(const char *dir, const K3Cfg *c)
 {
     K3Trunk tr;
-    if (k3_trunk_open(&tr, dir, c, 12288) != 0) {
+    if (k3_trunk_open(&tr, dir, c, 12288, 0) != 0) {
         fprintf(stderr, "TRUNK OPEN FAILED (one-slot)\n"); return 1;
     }
     ck(tr.nslot == 1, "one-slot: ring is 1 slot", "");
     ck(tr.npin == 0,  "one-slot: nothing pinned", "");
 
-    int guard_ok = (tr.io_state == NULL);
+    /* The invariant is that no reader THREAD runs with one slot: it would pread layer
+     * L+1 straight over the slot the caller is computing on. The io state itself may
+     * exist (its mutex serialises slot bookkeeping either way), so test the thread. */
+    int guard_ok = !tr.reader_started;
     ck(guard_ok, "one-slot: io_state is NULL (guard)", "");
     if (!guard_ok) {
         fprintf(stderr, "  *** the one-slot reader guard did not fire. "
@@ -395,7 +398,7 @@ static int test_one_slot(const char *dir, const K3Cfg *c)
 static int test_two_slot(const char *dir, const K3Cfg *c)
 {
     K3Trunk tr;
-    if (k3_trunk_open(&tr, dir, c, 24576) != 0) {
+    if (k3_trunk_open(&tr, dir, c, 24576, 0) != 0) {
         fprintf(stderr, "TRUNK OPEN FAILED (two-slot)\n"); return 1;
     }
     ck(tr.nslot == 2, "two-slot: ring has 2 slots", "");
@@ -476,7 +479,7 @@ static int test_two_slot(const char *dir, const K3Cfg *c)
 static int test_truncated(const char *dir, const K3Cfg *c)
 {
     K3Trunk tr;
-    if (k3_trunk_open(&tr, dir, c, 24576) != 0) {
+    if (k3_trunk_open(&tr, dir, c, 24576, 0) != 0) {
         fprintf(stderr, "TRUNK OPEN FAILED (truncated)\n"); return 1;
     }
 
