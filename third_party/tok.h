@@ -509,8 +509,19 @@ static void pretok_chunk_kimi(Tok *T, const unsigned char *p, int a, int b, int 
 }
 
 /* ---------- encode: text -> ids (split on added tokens, then pre-tokenise + BPE) ---------- */
-static int tok_encode(Tok *T, const char *text, int len, int *out, int max){
+/* Encode with an explicit policy for added tokens.  Prompt templates need their
+ * structural markers to remain atomic, while untrusted user text must never turn a
+ * spelling such as "<|end_of_msg|>" into a control id.  Keep tok_encode() below as
+ * the historical allow-all entry point so existing callers retain their behaviour. */
+static int tok_encode_mode(Tok *T, const char *text, int len, int *out, int max,
+                           int allow_added){
     const unsigned char *p=(const unsigned char*)text; int no=0; int i=0;
+    if(!allow_added){
+        if(T->kimi)       pretok_chunk_kimi(T,p,0,len,out,&no,max);
+        else if(T->o200k) pretok_chunk_o200k(T,p,0,len,out,&no,max);
+        else              pretok_chunk(T,p,0,len,out,&no,max);
+        return no;
+    }
     while(i<len){
         /* next added-token occurrence at or after i (longest match) */
         int hitpos=-1, hitlen=0, hitid=-1;
@@ -531,6 +542,10 @@ static int tok_encode(Tok *T, const char *text, int len, int *out, int max){
         i=hitpos+hitlen;
     }
     return no;
+}
+
+static int tok_encode(Tok *T, const char *text, int len, int *out, int max){
+    return tok_encode_mode(T,text,len,out,max,1);
 }
 
 /* id of an added token given its content (e.g. "<|endoftext|>"); -1 if absent */

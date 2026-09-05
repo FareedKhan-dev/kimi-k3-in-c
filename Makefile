@@ -115,6 +115,7 @@ else
   endif
   OMP_CFLAGS ?= -fopenmp
   OMP_LDFLAGS ?= -fopenmp
+  ASAN_RUN_OPTIONS ?= detect_leaks=1:halt_on_error=1
 endif
 
 # Linux and macOS: the platform's own CC already has a working sanitizer runtime, so
@@ -141,7 +142,7 @@ LDFLAGS  ?= -lm $(OMP_LDFLAGS) -pthread
 # Flat include search across the module dirs: sources use "k3.h", "k3_cache.h" etc
 # rather than path-qualified includes, which keeps them relocatable.
 INCLUDES := -Iinclude -Iinclude/k3 -Ithird_party \
-            -Isrc/core -Isrc/io -Isrc/cache -Isrc/model -Isrc/tokenizer
+            -Isrc/core -Isrc/io -Isrc/cache -Isrc/model -Isrc/tokenizer -Isrc/chat
 
 # ----------------------------------------------------------------------------- files --
 ENGINE_SRC := src/core/k3_ops.c \
@@ -151,10 +152,11 @@ ENGINE_SRC := src/core/k3_ops.c \
 ENGINE_OBJ := $(patsubst %.c,$(BUILD)/%.o,$(ENGINE_SRC))
 
 CLI_SRC    := src/cli/k3_run.c
+CHAT_SRC   := src/chat/k3_chat.c src/chat/k3_sampler.c
 CLI_BIN    := $(BIN)/k3
 
 # Tests that need no checkpoint. These run in CI on every push.
-UNIT_TESTS := test_ops test_cache test_st test_model_stream test_cfg test_tok scale_test k3_model test_trunk
+UNIT_TESTS := test_ops test_cache test_st test_model_stream test_cfg test_tok test_chat scale_test k3_model test_trunk
 # Tests that need real shards. Built and run by `make test-all` with SHARD_DIR set;
 # see the weights-test target below.
 WEIGHT_TESTS := test_expert test_real_layer
@@ -178,8 +180,8 @@ $(BUILD)/%.o: %.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
-$(CLI_BIN): $(CLI_SRC) $(ENGINE_OBJ) | $(BIN)
-	$(CC) $(CFLAGS) $(INCLUDES) $(CLI_SRC) $(ENGINE_OBJ) -o $@ $(LDFLAGS)
+$(CLI_BIN): $(CLI_SRC) $(CHAT_SRC) $(ENGINE_OBJ) | $(BIN)
+	$(CC) $(CFLAGS) $(INCLUDES) $(CLI_SRC) $(CHAT_SRC) $(ENGINE_OBJ) -o $@ $(LDFLAGS)
 
 $(BIN):
 	@mkdir -p $(BIN)
@@ -204,6 +206,9 @@ $(BIN)/test_model_stream: tests/unit/test_model_stream.c $(BUILD)/src/model/k3_b
 # so they build and are verifiable on any machine, including one with no checkpoint.
 $(BIN)/test_tok: tests/unit/test_tok.c | $(BIN)
 	$(CC) -O2 -std=c99 $(WARN) -Wno-unused-function $(INCLUDES) $< -o $@
+
+$(BIN)/test_chat: tests/unit/test_chat.c src/chat/k3_chat.c src/chat/k3_sampler.c | $(BIN)
+	$(CC) $(CFLAGS) -Wno-unused-function $(INCLUDES) $^ -o $@ $(LDFLAGS)
 
 $(BIN)/test_cfg: tests/unit/test_cfg.c src/core/k3_ops.c | $(BIN)
 	$(CC) -O2 -std=c99 $(WARN) -Wno-unused-function $(INCLUDES) $^ -o $@ -lm
@@ -249,8 +254,16 @@ test: $(CLI_BIN) $(TEST_BINS)
 	      ./$(BIN)/test_tok "$(TOK_FILES)" roundtrip src/core/k3_ops.c; \
 	  else \
 	      echo "  NOT RUN: no tiktoken.model at $(TOK_FILES)"; \
-	      echo "           the vocabulary ships with the checkpoint, not with this"; \
-	      echo "           repository. Run: make tok TOK_FILES=/path/to/k3model"; \
+	          echo "           the vocabulary ships with the checkpoint, not with this"; \
+	          echo "           repository. Run: make tok TOK_FILES=/path/to/k3model"; \
+	 fi
+	@echo "== chat template =="; \
+	  if [ -f "$(TOK_FILES)/tiktoken.model" ]; then \
+	      ./$(BIN)/test_chat "$(TOK_FILES)"; \
+	  else \
+	      echo "  NOT RUN: no tiktoken.model at $(TOK_FILES)"; \
+	      echo "           the XTML template is checked against the released tokenizer,"; \
+	      echo "           which ships with the checkpoint. Run: make test TOK_FILES=/path/to/k3model"; \
 	  fi
 	@echo "== real dimensions ==";   ./$(BIN)/scale_test
 	@echo "== trunk streaming ==";   ./$(BIN)/test_trunk
