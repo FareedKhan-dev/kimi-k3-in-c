@@ -461,8 +461,9 @@ serialize opaque KV, MLA, or KDA state. A supplied `--system` must exactly match
 initial system record. Literal control-marker text in user messages is encoded as ordinary
 text, never as an XTML control token.
 
-Chat defaults to `--gen 4096`, temperature `1.0`, and top-p `0.95`; batch generation stays
-greedy with its existing eight-token default. `--greedy` makes chat argmax too. Sampling uses
+Chat defaults to `--gen 4096` and, like batch generation, to greedy decoding. Passing any
+of `--temperature`, `--top-p` or `--seed` turns sampling on (temperature `1.0`, top-p
+`0.95` unless given); `--greedy` forces argmax even then. Sampling uses
 PCG32; `--seed N` deterministically derives one stream per assistant turn, so replaying the
 same transcript with the same seed is reproducible. The 32K prompt / 4096 generation limits
 are existing engine limits, not new chat limits; chat fails clearly and retains the history

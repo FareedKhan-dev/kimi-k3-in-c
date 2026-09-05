@@ -385,10 +385,10 @@ static void usage(FILE *f)
 "  --chat                terminal REPL; uses the official XTML template\n"
 "  --system TEXT         initial system message (stored in --history)\n"
 "  --history PATH        portable JSONL transcript; rebuilt on restart\n"
-"  --temperature X       chat sampling temperature (default 1.0)\n"
-"  --top-p P             chat nucleus probability (default 0.95)\n"
-"  --seed N              deterministic chat sampling seed\n"
-"  --greedy              use argmax instead of chat sampling\n"
+"  --temperature X       turn chat sampling on, at this temperature (default: greedy)\n"
+"  --top-p P             nucleus probability for chat sampling (default 0.95)\n"
+"  --seed N              chat sampling seed; any of these three turns sampling on\n"
+"  --greedy              force argmax even when a sampling flag was given\n"
 "\n"
 "diagnostics:\n"
 "  --config PATH         model config; defaults to <model_dir>/config.json\n"
@@ -998,6 +998,13 @@ int main(int argc, char **argv)
         fprintf(stderr, "--system, --history, --temperature, --top-p, --seed, and --greedy require --chat\n");
         return 2;
     }
+    /* Greedy unless a sampling flag was given. Greedy decoding is what makes output
+     * identical across memory budgets, which the test suite depends on, so sampling
+     * is opt-in here exactly as docs/ROADMAP.md says it must be; a chat REPL that
+     * silently sampled would be the one path in the engine whose output could not
+     * be reproduced. --greedy stays as an explicit override for scripts that set a
+     * temperature and then want it ignored. */
+    if (!(temperature_set || top_p_set || seed_set)) greedy = 1;
     if (chat && !seed_set) {
         /* A supplied seed is reproducible across restarts.  Without one, start a fresh
          * stochastic session; the generated value is printed in the banner. */
