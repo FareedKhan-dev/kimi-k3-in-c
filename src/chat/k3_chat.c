@@ -325,10 +325,12 @@ int k3_chat_template_init(Tok *tok, K3ChatTemplate *t, char *err, size_t err_n)
 {
     t->open_id = tok_id_of(tok, "<|open|>"); t->close_id = tok_id_of(tok, "<|close|>");
     t->sep_id = tok_id_of(tok, "<|sep|>"); t->eom_id = tok_id_of(tok, "<|end_of_msg|>");
+    t->eos_id = tok_id_of(tok, "[EOS]");
     if (t->open_id < 0 || t->close_id < 0 || t->sep_id < 0 || t->eom_id < 0) {
         fail(err, err_n, "K3 tokenizer is missing required XTML control tokens"); return -1;
     }
     if (t->eom_id != 163586) { fail(err, err_n, "K3 end_of_msg id is %d, expected official id 163586", t->eom_id); return -1; }
+    if (t->eos_id != 163585) { fail(err, err_n, "K3 [EOS] id is %d, expected official id 163585", t->eos_id); return -1; }
     return 0;
 }
 
@@ -402,12 +404,16 @@ int k3_chat_parse_assistant(Tok *tok, const K3ChatTemplate *t, const int *ids, i
     int nt = ids_for(tok, "think", think), nr = ids_for(tok, "response", response), nm = ids_for(tok, "message", message);
     int na = 0, nz = 0;
     a[na++] = t->close_id; memcpy(a + na, think, (size_t)nt * sizeof(int)); na += nt; a[na++] = t->sep_id; a[na++] = t->open_id; memcpy(a + na, response, (size_t)nr * sizeof(int)); na += nr; a[na++] = t->sep_id;
-    z[nz++] = t->close_id; memcpy(z + nz, response, (size_t)nr * sizeof(int)); nz += nr; z[nz++] = t->sep_id; z[nz++] = t->close_id; memcpy(z + nz, message, (size_t)nm * sizeof(int)); nz += nm; z[nz++] = t->sep_id; z[nz++] = t->eom_id;
+    z[nz++] = t->close_id; memcpy(z + nz, response, (size_t)nr * sizeof(int)); nz += nr; z[nz++] = t->sep_id; z[nz++] = t->close_id; memcpy(z + nz, message, (size_t)nm * sizeof(int)); nz += nm; z[nz++] = t->sep_id;
     int split = -1, end = -1;
     for (int i = 0; i < n; i++) if (match(ids, n, i, a, na)) { split = i; break; }
     if (split < 0) { fail(err, err_n, "assistant output has no <think> to <response> boundary"); return -1; }
     for (int i = split + na; i < n; i++) if (match(ids, n, i, z, nz)) { end = i; break; }
-    if (end < 0 || end + nz != n) { fail(err, err_n, "assistant output is missing the official response/message/end_of_msg closure"); return -1; }
+    /* The closure is followed by exactly one end id, and either declared id is accepted:
+     * the released model ends its turn with [EOS], the template inserts <|end_of_msg|>. */
+    if (end < 0 || end + nz != n - 1 || (ids[n - 1] != t->eom_id && ids[n - 1] != t->eos_id)) {
+        fail(err, err_n, "assistant output is missing the official response/message closure and end id"); return -1;
+    }
     /* Stored transcript text is re-encoded with special tokens disabled.  Accepting a
      * control id in either payload would therefore make a restart differ from the live
      * turn, so treat it as malformed instead of silently changing the conversation. */

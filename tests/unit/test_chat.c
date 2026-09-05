@@ -114,7 +114,15 @@ int main(int argc, char **argv)
        "assistant stop boundary and think/response parser");
     k3_chat_message_free(&parsed);
     ok(k3_chat_parse_assistant(&tok, &tmpl, raw, rn - 1, &parsed, err, sizeof err) != 0,
-       "missing end_of_msg is rejected");
+       "missing end id is rejected");
+    raw[rn - 1] = tmpl.eos_id;
+    ok(k3_chat_parse_assistant(&tok, &tmpl, raw, rn, &parsed, err, sizeof err) == 0,
+       "turn ended by [EOS], the id the released model emits, is accepted");
+    k3_chat_message_free(&parsed);
+    raw[rn - 1] = tmpl.sep_id;
+    ok(k3_chat_parse_assistant(&tok, &tmpl, raw, rn, &parsed, err, sizeof err) != 0,
+       "a closure followed by a non-end id is rejected");
+    raw[rn - 1] = tmpl.eom_id;
     int saved = raw[0]; raw[0] = tmpl.open_id;
     ok(k3_chat_parse_assistant(&tok, &tmpl, raw, rn, &parsed, err, sizeof err) != 0,
        "assistant payload control tokens are rejected rather than changing restart tokens");

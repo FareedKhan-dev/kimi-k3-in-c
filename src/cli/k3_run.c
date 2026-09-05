@@ -784,10 +784,13 @@ static int chat_run(Tok *tok, const K3ChatTemplate *tmpl, K3ChatHistory *history
                 fprintf(stderr, "chat: sampler failed\n"); frc = -1; break;
             }
             (*seq)[T++] = next; outtok[nraw++] = next;
-            if (next == tmpl->eom_id) break;
+            if (next == tmpl->eom_id || next == tmpl->eos_id) {
+                printf("chat: turn ended by %s (%d)\n", next == tmpl->eom_id ? "<|end_of_msg|>" : "[EOS]", next);
+                break;
+            }
         }
         k3_sampler_free(&sampler);
-        if (frc || (nraw == gen && outtok[nraw - 1] != tmpl->eom_id)) {
+        if (frc || (nraw == gen && outtok[nraw - 1] != tmpl->eom_id && outtok[nraw - 1] != tmpl->eos_id)) {
             fprintf(stderr, "chat: assistant did not complete an official turn within --gen %d; transcript is preserved\n", gen);
             return 1;
         }

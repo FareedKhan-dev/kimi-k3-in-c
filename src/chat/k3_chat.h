@@ -20,6 +20,10 @@ typedef struct {
 
 typedef struct {
     int open_id, close_id, sep_id, eom_id;
+    int eos_id; /* tokenizer_config's [EOS]. The released checkpoint declares TWO end ids that
+                 * disagree -- config.json says <|end_of_msg|> (163586), tokenizer_config.json
+                 * says [EOS] (163585) -- and the model emits 163585 at the end of a turn. A
+                 * turn may legitimately end with either.                                    */
 } K3ChatTemplate;
 
 typedef struct {
