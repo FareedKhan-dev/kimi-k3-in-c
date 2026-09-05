@@ -745,7 +745,7 @@ static void moe_prefill_chunk(float *out, const float *x, const K3MoeW *w,
     int nu = 0;
     /* Same hint as the per-token path: routing has not happened yet and the source may
      * have a guess worth starting now. */
-    if (w->src->speculate) w->src->speculate(w->src, w->layer);
+    if (w->src && w->src->speculate) w->src->speculate(w->src, w->layer);
     for (int t = 0; t < T; t++) {
         const float *xt = x + (size_t)t * E;
         int   *it = ridx + (size_t)t * K;
