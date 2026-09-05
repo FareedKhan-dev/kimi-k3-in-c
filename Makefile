@@ -216,7 +216,7 @@ $(BIN)/scale_test: tests/unit/scale_test.c $(BUILD)/src/core/k3_ops.o | $(BIN)
 $(BIN)/k3_model: tests/unit/k3_model.c $(BUILD)/src/core/k3_ops.o | $(BIN)
 	$(CC) $(CFLAGS) $(INCLUDES) $^ -o $@ $(LDFLAGS)
 
-$(BIN)/test_trunk: tests/unit/test_trunk.c $(BUILD)/src/io/k3_trunk.o \
+$(BIN)/test_trunk: tests/unit/test_trunk.c $(BUILD)/src/io/k3_trunk.o $(BUILD)/src/io/k3_uring.o \
                    $(BUILD)/src/io/k3_st.o \
                    $(BUILD)/src/model/k3_bind.o \
                    $(BUILD)/src/core/k3_ops.o | $(BIN)

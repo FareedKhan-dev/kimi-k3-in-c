@@ -114,6 +114,8 @@ typedef struct {
     int64_t      slot_bytes;    /* raw run + the widen area                     */
     int64_t      widen_bytes;   /* of slot_bytes, the fp32 expansion area       */
     int          nslot;
+    int          reader_started; /* 1 once the async reader thread is running; the
+                                  * one-slot guard requires this to stay 0     */
     int          npin;          /* how many layers are pinned                   */
     int         *layer_of;      /* [nslot] which layer occupies each ring slot  */
     int32_t     *slot_of;       /* [n_layers], -1 when not resident             */

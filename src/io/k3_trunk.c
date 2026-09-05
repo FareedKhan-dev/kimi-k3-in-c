@@ -402,6 +402,7 @@ int k3_trunk_open(K3Trunk *tr, const char *dir, const K3Cfg *c, int64_t budget_b
                 tr->io_state = NULL;
                 return -1;
             }
+            tr->reader_started = 1;
             io->running = 1;
         }
     }
@@ -685,7 +686,15 @@ int k3_trunk_fetch(K3Trunk *tr, int L, unsigned char **out)
                 io->pending[slot] = -1;
                 if (rc == 0) { tr->layer_of[slot] = L; tr->slot_of[L] = slot; }
                 pthread_cond_broadcast(&io->cv_done);
-                if (rc != 0) { pthread_mutex_unlock(&io->mu); return -1; }
+                if (rc != 0) {
+                    /* A bind that fails moved no usable bytes and published nothing,
+                     * so it is not a cache event: hits + misses counts COMPLETED binds,
+                     * and test_trunk's truncated case holds the reader to that. The
+                     * miss was charged on the first look above; take it back. */
+                    tr->misses--;
+                    pthread_mutex_unlock(&io->mu);
+                    return -1;
+                }
                 break;
             }
             pthread_cond_wait(&io->cv_done, &io->mu);   /* every slot is busy */
