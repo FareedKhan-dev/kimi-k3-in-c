@@ -29,6 +29,7 @@ k3trunk/
 
 # credentials
 hf_token*
+token.env
 *.pem
 *_key
 *_key.pub

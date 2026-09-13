@@ -247,9 +247,11 @@ static inline int k3_cfg_load(K3Cfg *c, int *fa, int fa_max, jval *root, const c
     return 1;
 }
 
-/* Convenience: read and parse a config file, then load it. The returned arena is left
- * allocated because K3Cfg does not copy the strings it does not own; callers keep it
- * for the process lifetime, which every caller here does. */
+/* Convenience: read and parse a config file, then load it. k3_cfg_load copies
+ * every value it keeps (numbers into K3Cfg, layer indices into fa), so the
+ * parse tree is dead on return and freed here on ALL paths, success or
+ * refusal. (Older revisions leaked the tree and called it process-lifetime;
+ * a config parse is kilobytes, and leaks are how 700 KB disappear.) */
 static inline int k3_cfg_load_file(K3Cfg *c, int *fa, int fa_max, const char *path)
 {
     FILE *f = fopen(path, "rb");
@@ -270,7 +272,10 @@ static inline int k3_cfg_load_file(K3Cfg *c, int *fa, int fa_max, const char *pa
     char *arena = NULL;
     jval *root = json_parse(txt, &arena);
     if (!root) { fprintf(stderr, "%s: not valid JSON\n", path); free(txt); return 0; }
-    return k3_cfg_load(c, fa, fa_max, root, path);
+    const int rc = k3_cfg_load(c, fa, fa_max, root, path);
+    json_free_tree(root);
+    free(txt);
+    return rc;
 }
 
 #endif /* K3_CFG_H */
