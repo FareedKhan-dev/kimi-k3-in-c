@@ -98,6 +98,98 @@ void k3_rmsnorm(float *y, const float *x, const float *w, int n, float eps)
     for (int i = 0; i < n; i++) y[i] = w[i] * x[i] * inv;
 }
 
+/* -------------------------------------------------------------- sampling ---- */
+/* Self-contained xorshift64 streams: the caller owns the state, so greedy
+ * exactness never depends on call order and each batch sequence draws only
+ * from its own stream (seed + index). A NULL stream with temp > 0 falls back
+ * to the argmax rather than touching a global. */
+uint64_t k3_rng_next(uint64_t *st)
+{
+    uint64_t x = *st ? *st : 0x243F6A8885A308D3ull;
+    x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+    *st = x;
+    return x;
+}
+
+double k3_rng_double(uint64_t *st) /* [0,1) with 53 bits */
+{ return (double)(k3_rng_next(st) >> 11) * (1.0 / 9007199254740992.0); }
+
+int k3_sample_next(const float *logits, int n, float temp,
+                   int top_k, float top_p, uint64_t *rng)
+{
+    if (n <= 0) return -1;
+    int b = 0;
+    for (int i = 1; i < n; i++) if (logits[i] > logits[b]) b = i;
+    /* NaN temperature falls through `temp <= 0` (false), so test the positive
+     * case instead: NaN (or missing rng) means greedy, never silent sampling. */
+    if (!(temp > 0.0f) || !rng) return b;
+    if (top_k <= 0 || top_k > n) top_k = n;
+    /* Partial selection of top_k by repeated max-extraction. n=163840 and
+     * top_k small (typical <= 50), so O(n*top_k) is fine and needs no heap. */
+    static int *cand = NULL; static int cand_cap = 0;
+    /* NOTE: single-threaded decode loop only; no thread-safety needed. */
+    if (cand_cap < top_k) {
+        free(cand); cand = NULL; cand_cap = 0;
+        cand = (int *)malloc((size_t)top_k * sizeof(int));
+        if (!cand) return b;
+        cand_cap = top_k;
+    }
+    float *work = (float *)malloc((size_t)n * sizeof(float));
+    if (!work) return b;
+    memcpy(work, logits, (size_t)n * sizeof(float));
+    /* NaN marks a taken slot: `x == x` is false only for NaN, so taken
+     * entries can never win a later round. A -1e30f sentinel fails here:
+     * masked-out -inf logits lose to it, and the same index gets picked
+     * twice, double-counting its nucleus weight. NaN also keeps working
+     * when every remaining logit is -inf (distinct indices still win). */
+    for (int k = 0; k < top_k; k++) {
+        int m = -1;
+        for (int i = 0; i < n; i++)
+            if (work[i] == work[i] && (m < 0 || work[i] > work[m])) m = i;
+        if (m < 0) m = 0;   /* unreachable: top_k <= n, so a slot remains */
+        cand[k] = m; work[m] = 0.0f / 0.0f;
+    }
+    free(work);
+    /* Softmax over candidates with temperature. */
+    float mx = logits[cand[0]];
+    for (int k = 1; k < top_k; k++) if (logits[cand[k]] > mx) mx = logits[cand[k]];
+    double denom = 0.0;
+    static double *prob = NULL; static int prob_cap = 0;
+    if (prob_cap < top_k) {
+        free(prob); prob = NULL; prob_cap = 0;
+        prob = (double *)malloc((size_t)top_k * sizeof(double));
+        if (!prob) return cand[0];
+        prob_cap = top_k;
+    }
+    for (int k = 0; k < top_k; k++) {
+        prob[k] = exp((double)(logits[cand[k]] - mx) / (double)temp);
+        denom += prob[k];
+    }
+    /* Nucleus (top-p) truncation over the temp-scaled distribution, in
+     * descending probability order (candidates already are, approximately,
+     * since they were extracted by descending logit). */
+    int kept = top_k;
+    if (top_p > 0.0f && top_p < 1.0f) {
+        double acc = 0.0; kept = 0;
+        for (int k = 0; k < top_k; k++) {
+            acc += prob[k] / denom;
+            kept++;
+            if (acc >= (double)top_p) break;
+        }
+        if (kept < 1) kept = 1;
+    }
+    /* Exactly one RNG draw per token: the walk consumes a single uniform, so
+     * reference replays that step the stream once stay in lockstep. */
+    double kept_mass = 0.0;
+    for (int k = 0; k < kept; k++) kept_mass += prob[k];
+    double r = k3_rng_double(rng) * kept_mass;
+    for (int k = 0; k < kept; k++) {
+        r -= prob[k];
+        if (r <= 0.0) return cand[k];
+    }
+    return cand[kept - 1];
+}
+
 /* -------------------------------------------------------------- SiTU-GLU ---- */
 static inline float sigmoidf_(float x) { return 1.0f / (1.0f + expf(-x)); }
 
@@ -739,6 +831,16 @@ static void moe_prefill_chunk(float *out, const float *x, const K3MoeW *w,
             k3_expert_drops++;
             fprintf(stderr, "EXPERT DROP: layer %d expert %d failed to load; "
                             "this chunk is CORRUPT\n", w->layer, e);
+            /* The per-token path `continue`s past a miss, contributing zero.
+             * Zero these slots so the chunked path reads no malloc garbage
+             * and stays bit-identical to it on the fault path too. */
+            for (int t = 0; t < T; t++) {
+                const int *it = ridx + (size_t)t * K;
+                for (int j = 0; j < K; j++)
+                    if (it[j] == e)
+                        memset(contrib + ((size_t)t * K + j) * Ll, 0,
+                               (size_t)Ll * sizeof(float));
+            }
             continue;
         }
         for (int t = 0; t < T; t++) {

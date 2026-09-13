@@ -129,6 +129,17 @@ int  k3_is_dense(const K3Cfg *c, int layer);
  * to float32 from bf16 and sums 7168 terms. eps is INSIDE the rsqrt. */
 void k3_rmsnorm(float *y, const float *x, const float *w, int n, float eps);
 
+/* Seeded categorical sampling over logits (temperature + top-k + nucleus).
+ * temp <= 0 (or a NULL stream, or n <= 0 with -1) falls back to the argmax,
+ * so greedy decode never touches randomness. Streams are caller-owned
+ * xorshift64: same seed replays bit-identically, and batch sequences draw
+ * only from their own stream regardless of scheduling. Internal candidate
+ * buffers are static: single-threaded decode only. */
+uint64_t k3_rng_next(uint64_t *st);
+double   k3_rng_double(uint64_t *st);
+int      k3_sample_next(const float *logits, int n, float temp,
+                        int top_k, float top_p, uint64_t *rng);
+
 /* SiTU-GLU over a 2*n input laid out as [gate | up].
  *   a  = b1 * tanh(gate / b1) * sigmoid(gate)     sigmoid sees the UNCAPPED gate
  *   u  = b2 * tanh(up / b2)
