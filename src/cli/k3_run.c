@@ -570,6 +570,9 @@ int main(int argc, char **argv)
         return 2;
     }
     const char *ids_s = NULL, *outp = "k3_run.json", *trunk_dir = NULL;
+    /* A run whose --out cannot be written used to exit 0, indistinguishable
+     * from success. Latch the failure and report it at the end. */
+    int out_fail = 0;
     /* Expert-cache diagnostics are opt-in. They are only meaningful for cache research,
      * and writing them unconditionally drops two undeclared files into whatever
      * directory the user happened to run from. */
@@ -723,6 +726,14 @@ int main(int argc, char **argv)
         fprintf(stderr, "ABORTED: the model config could not be read with confidence.\n");
         return 2;
     }
+    /* --layers 0/94/999 used to fall through and silently run the full
+     * model. A partial stack is a deliberate test instrument; an
+     * out-of-range request is a typo, and typos must fail loudly. */
+    if (want_layers != -1 && (want_layers < 1 || want_layers > c.n_layers)) {
+        fprintf(stderr, "--layers %d is out of range: want 1..%d\n",
+                want_layers, c.n_layers);
+        return 2;
+    }
     if (want_layers > 0 && want_layers < c.n_layers) {
         printf("NOTE: binding only the first %d of %d layers. Output is NOT the full "
                "model; it is a partial stack for testing the machinery.\n\n",
@@ -766,7 +777,17 @@ int main(int argc, char **argv)
         printf("  tokenized: %ld bytes -> %d ids\n", plen, np);
     } else {
         for (const char *p = ids_s; *p && np < K3_MAX_PROMPT; ) {
-            prompt[np++] = (int)strtol(p, (char **)&p, 10);
+            /* strtol without an endptr check spins forever on garbage
+             * ("abc" never advances p) and fills the prompt with zeros.
+             * Refuse the whole prompt instead of running the wrong one. */
+            char *end = NULL;
+            long v = strtol(p, &end, 10);
+            if (end == p || (*end != ',' && *end != ' ' && *end != '\0')) {
+                fprintf(stderr, "bad --ids: '%s' is not a comma list of integers\n", ids_s);
+                return 2;
+            }
+            prompt[np++] = (int)v;
+            p = end;
             while (*p == ',' || *p == ' ') p++;
         }
     }
@@ -782,8 +803,10 @@ int main(int argc, char **argv)
      * Refuse rather than clamp: a caller who asks for more tokens than this build
      * supports should be told, not quietly handed fewer. The decode loop's own guard
      * (T >= Tmax) is a backstop, not a bounds check. */
-    if (gen < 0 || gen > K3_MAX_GEN) {
-        fprintf(stderr, "--gen %d is out of range: this build generates at most %d "
+    /* --gen 0 used to pass validation and divide by zero in the timing
+     * tail (t_total/nout with nout == 0). Zero tokens is a misuse. */
+    if (gen < 1 || gen > K3_MAX_GEN) {
+        fprintf(stderr, "--gen %d is out of range: this build generates 1..%d "
                         "tokens (outtok[%d])\n", gen, K3_MAX_GEN, K3_MAX_GEN);
         return 2;
     }
@@ -1400,6 +1423,10 @@ int main(int argc, char **argv)
     k3_cache_report(&cache, "final step");
 
     FILE *f = fopen(outp, "w");
+    if (!f) {
+        fprintf(stderr, "cannot write %s\n", outp);
+        out_fail = 1;
+    }
     if (f) {
         fprintf(f, "{\"prompt_ids\":[");
         for (int i = 0; i < np; i++) fprintf(f, "%s%d", i ? "," : "", prompt[i]);
@@ -1483,5 +1510,6 @@ int main(int argc, char **argv)
                 "the shard set or the storage is at fault.\n", k3_expert_drops);
         return 4;
     }
+    if (out_fail) return 3;
     return 0;
 }
