@@ -145,7 +145,7 @@ INCLUDES := -Iinclude -Iinclude/k3 -Ithird_party \
 
 # ----------------------------------------------------------------------------- files --
 ENGINE_SRC := src/core/k3_ops.c \
-              src/io/k3_st.c src/io/k3_load.c src/io/k3_trunk.c \
+              src/io/k3_st.c src/io/k3_load.c src/io/k3_trunk.c src/io/k3_uring.c \
               src/cache/k3_cache.c \
               src/model/k3_bind.c
 ENGINE_OBJ := $(patsubst %.c,$(BUILD)/%.o,$(ENGINE_SRC))
@@ -216,7 +216,7 @@ $(BIN)/scale_test: tests/unit/scale_test.c $(BUILD)/src/core/k3_ops.o | $(BIN)
 $(BIN)/k3_model: tests/unit/k3_model.c $(BUILD)/src/core/k3_ops.o | $(BIN)
 	$(CC) $(CFLAGS) $(INCLUDES) $^ -o $@ $(LDFLAGS)
 
-$(BIN)/test_trunk: tests/unit/test_trunk.c $(BUILD)/src/io/k3_trunk.o \
+$(BIN)/test_trunk: tests/unit/test_trunk.c $(BUILD)/src/io/k3_trunk.o $(BUILD)/src/io/k3_uring.o \
                    $(BUILD)/src/io/k3_st.o \
                    $(BUILD)/src/model/k3_bind.o \
                    $(BUILD)/src/core/k3_ops.o | $(BIN)

@@ -60,6 +60,7 @@ add_library(k3 STATIC
   src/io/k3_st.c
   src/io/k3_load.c
   src/io/k3_trunk.c
+  src/io/k3_uring.c
   src/cache/k3_cache.c
   src/model/k3_bind.c)
 
