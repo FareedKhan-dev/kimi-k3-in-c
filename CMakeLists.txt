@@ -27,8 +27,45 @@ endif()
 option(K3_NATIVE_ARCH "Optimise for the building CPU (-march/-mcpu=native)" OFF)
 option(K3_SANITIZE    "Build with ASan + UBSan"                        OFF)
 
-find_package(OpenMP)
 find_package(Threads REQUIRED)
+
+# Apple Clang ships no OpenMP runtime and does not search Homebrew's libomp by itself,
+# so find_package(OpenMP) fails on a stock macOS toolchain and the build silently
+# drops to a single-threaded engine. Mirror the Makefile: locate an installed libomp
+# explicitly and treat a miss as a warning the developer can act on, not as a reason
+# to build a different execution configuration without saying so. Everywhere else
+# find_package(OpenMP) already does the right thing and is left alone.
+if(APPLE)
+  set(K3_OMP_PREFIX "" CACHE PATH "Prefix containing libomp include/ and lib/")
+  if(NOT K3_OMP_PREFIX)
+    execute_process(COMMAND brew --prefix libomp
+                    OUTPUT_VARIABLE K3_OMP_PREFIX
+                    OUTPUT_STRIP_TRAILING_WHITESPACE
+                    ERROR_QUIET)
+  endif()
+  if(K3_OMP_PREFIX)
+    find_path(K3_OMP_INCLUDE_DIR NAMES omp.h HINTS ${K3_OMP_PREFIX}/include)
+    find_library(K3_OMP_LIBRARY NAMES omp HINTS ${K3_OMP_PREFIX}/lib)
+  endif()
+  if(K3_OMP_INCLUDE_DIR AND K3_OMP_LIBRARY)
+    # Same flags the Makefile passes: -Xpreprocessor -fopenmp for Apple Clang, the
+    # header dir, and the library itself. Exposed through one imported target so the
+    # link line below is identical on every platform.
+    add_library(k3_openmp INTERFACE IMPORTED)
+    set_target_properties(k3_openmp PROPERTIES
+      INTERFACE_COMPILE_OPTIONS "-Xpreprocessor;-fopenmp"
+      INTERFACE_INCLUDE_DIRECTORIES "${K3_OMP_INCLUDE_DIR}"
+      INTERFACE_LINK_LIBRARIES "${K3_OMP_LIBRARY}")
+    set(K3_OPENMP_TARGET k3_openmp)
+  else()
+    message(WARNING "Homebrew libomp was not found; install it with `brew install libomp` or configure -DK3_OMP_PREFIX=/path/to/libomp. Building without OpenMP.")
+  endif()
+else()
+  find_package(OpenMP)
+  if(OpenMP_C_FOUND)
+    set(K3_OPENMP_TARGET OpenMP::OpenMP_C)
+  endif()
+endif()
 
 add_library(k3_flags INTERFACE)
 target_compile_options(k3_flags INTERFACE
@@ -74,8 +111,8 @@ target_include_directories(k3 PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src/tokenizer)
 
 target_link_libraries(k3 PUBLIC k3_flags m Threads::Threads)
-if(OpenMP_C_FOUND)
-  target_link_libraries(k3 PUBLIC OpenMP::OpenMP_C)
+if(K3_OPENMP_TARGET)
+  target_link_libraries(k3 PUBLIC ${K3_OPENMP_TARGET})
 endif()
 
 # ------------------------------------------------------------------------------ cli --
