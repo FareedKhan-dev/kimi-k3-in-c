@@ -7,6 +7,16 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`--chat`**: a terminal REPL implementing K3's official XTML chat format, message
+  envelopes, the `thinking_effort` system preamble, and `reasoning_content` on prior
+  assistant turns, rendered exactly as the checkpoint's own encoder does, with JSONL
+  history and a parser for one assistant completion. Greedy by default; `--temperature`,
+  `--top-p`, and `--seed` opt in to sampling. `--no-think` and `--thinking-effort low`,
+  `high`, or `max` skip or size the think channel, which on a short answer is most of
+  the cost. Without a chat template the engine had completed a chat-shaped prompt as if
+  it were mid document rather than answering it.
+- **`--trunk-ring N`**: the streaming trunk's prefetch queue depth is now a flag
+  (default 2) instead of fixed at two slots.
 - **`--stop-id N`** (repeatable, up to 8): generation halts as soon as the model emits
   a listed token id. Off by default, so `--gen N` still means exactly N tokens for
   every benchmark and oracle gate. The stop id stays in the sequence, so `--save-state`
@@ -43,9 +53,31 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   expert path already does. Without OpenMP the loop still runs one chunk at a time. A
   short read in any chunk fails the whole layer, as before, and the decoded output and
   `trunk_bytes_read` are unchanged.
+- **Trunk layers are pinned largest-first instead of as a prefix.** Prefix pinning
+  always pinned the 2.34 GB dense layer first, which sized the streaming ring's slot to
+  it even after it stopped needing the ring at all. `K3_PIN_PREFIX=1` restores the old
+  order on the same binary.
 
 ### Fixed
 
+- **Hostile or corrupt safetensors, trunk, and config input could reach undefined
+  behavior instead of a refusal.** Integer overflow in shape and offset arithmetic
+  (a hostile shape or `data_offsets` pair near `INT64_MAX` could wrap and defeat the
+  bounds checks meant to catch it), an out-of-bounds read on an empty trunk layer
+  array, a batched MoE prefill path that summed uninitialized memory when an expert
+  failed to load instead of contributing zero as the per-token path already does, and
+  unchecked allocations in the JSON parser and the shard directory listing that could
+  crash through a null pointer rather than fail cleanly. A new weightless test,
+  `test_st_faults`, builds mutated copies of the fixture shards and asserts each
+  failure mode is refused loudly. No input that was already valid changes.
+- **`--ids` with a non-numeric piece silently became token id 0** instead of being
+  refused, because a failed `strtol` call and a real id of 0 are indistinguishable
+  without checking where parsing stopped.
+- **`--layers 0` or a value past the real layer count silently ran the complete
+  model**, as if `--layers` had not been given, instead of being refused as the typo
+  it almost always is.
+- **An `--out` path that could not be written still exited 0**, indistinguishable from
+  a run whose result was actually saved. It now exits 3.
 - **`k3_run.json` was not valid JSON after a run that generated nothing.** With
   `nout == 0` the `seconds_per_token` field computed `t_total / nout` and emitted a
   bare `inf`, so a harness driving `--gen 0 --save-state` failed on the one run it

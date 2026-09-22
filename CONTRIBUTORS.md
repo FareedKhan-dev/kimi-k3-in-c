@@ -51,6 +51,23 @@ record.
   resumed from a byte-exact state.
 - **[Avicennasis](https://github.com/Avicennasis)** -- hardened `--stop-id` parsing
   against silent typos, added its `stopped_at` line to `k3_run.json` and a weightless
-  contract gate, and kept `k3_run.json` valid when `--gen 0` generates nothing.
+  contract gate, and kept `k3_run.json` valid when `--gen 0` generates nothing; carried
+  the XTML chat REPL forward with the tokenizer bundle dropped, `--no-think` and
+  `--thinking-effort`, and the Windows portability fixes it needed (`getline`, `fsync`,
+  and a `rename` that actually replaces an existing file); found and fixed the missing
+  OpenMP link on the CMake Apple/libomp path; largest-first trunk pinning, the
+  `--trunk-ring` flag, and two prefetcher re-read bugs found by instrumentation rather
+  than by inspection.
+- **[Blake Evans](https://github.com/BlakeEvans22)** -- the original K3 XTML chat core
+  and REPL, reproducing the checkpoint's own chat format so the engine answers a
+  chat-shaped prompt instead of completing it.
+- **[FermiHart](https://github.com/FermiHart)** -- a set of parser hardening fixes
+  across the safetensors reader, the trunk reader, and the vendored JSON library:
+  integer-overflow saturation, offset and size checks that run before the arithmetic
+  they protect rather than after, a library that no longer calls `exit()` on an
+  allocation failure, and a new weightless fault-injection test; a batched MoE prefill
+  path that read uninitialized memory on an expert load failure instead of contributing
+  zero, exactly as the per-token path already does; and CLI refusals for a malformed
+  `--ids` list, an out-of-range `--layers`, and a lost `--out` file.
 
 Thank you, all of you.
