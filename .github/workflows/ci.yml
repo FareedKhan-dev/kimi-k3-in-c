@@ -121,11 +121,18 @@ jobs:
       # posix_memalign and getrusage become on this platform, and why -static and
       # -lpsapi (which the Makefile's Windows branch adds automatically) are
       # load-bearing rather than stylistic here.
+      #
+      # mingw-w64-x86_64-libgomp is explicit rather than left to the gcc package to
+      # pull in: MSYS2 lists it as an OPTIONAL dependency of
+      # mingw-w64-x86_64-gcc, not a required one, so a plain install of gcc leaves it
+      # absent. -static needs the static archive specifically, and the link then fails
+      # with "cannot find -lgomp" on a toolchain that otherwise looks complete,
+      # confirmed directly rather than assumed.
       - uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW64
           update: true
-          install: mingw-w64-x86_64-gcc make
+          install: mingw-w64-x86_64-gcc mingw-w64-x86_64-libgomp make
 
       - name: Build (default flags, platform detection)
         run: make
