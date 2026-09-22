@@ -859,12 +859,19 @@ void k3_kda_layer(float *out, const float *x, const K3KdaW *w, const K3Cfg *c,
     float *o  = bt + (size_t)T * H;      float *gb = o + (size_t)T * P;
     float *wr = gb + P;                  float *fa = wr + P;
 
-    /* 1. projections */
+    /* 1. projections
+     *
+     * q, k and v are the three largest matrices in the model at 176 MB each -- together
+     * 36.5 GB of the 72.4 GB of trunk DRAM traffic per token, measured from the packed
+     * trunk's own manifest. Batched, each is read ONCE for all T positions rather than T
+     * times. b, f_a and f_b stay per-token: they are 0.09-0.22 GB/token combined, and f_b
+     * consumes f_a's single shared scratch slot, so batching them would need a wider
+     * scratch for no measurable return. */
+    k3_mmw_batch(q, P, x, E, w->q, w->wdt, E, P, T);
+    k3_mmw_batch(k, P, x, E, w->k, w->wdt, E, P, T);
+    k3_mmw_batch(v, P, x, E, w->v, w->wdt, E, P, T);
     for (int t = 0; t < T; t++) {
         const float *xt = x + (size_t)t * E;
-        k3_mmw(q + (size_t)t * P, xt, w->q, w->wdt, E, P);
-        k3_mmw(k + (size_t)t * P, xt, w->k, w->wdt, E, P);
-        k3_mmw(v + (size_t)t * P, xt, w->v, w->wdt, E, P);
         k3_mmw(bt + (size_t)t * H, xt, w->b, w->wdt, E, H);
         /* ONE shared low-rank pair feeds every head: [E->D] then [D->H*D] */
         k3_mmw(fa, xt, w->f_a, w->wdt, E, D);
