@@ -197,6 +197,13 @@ static inline void k3_tok_load(Tok *T, const char *files_dir)
         fprintf(stderr, "k3_tok: tokenizer_config.json has no added_tokens_decoder\n");
         exit(1);
     }
+    /* json_get only guarantees non-NULL, not the type. An array here leaves
+     * adt->keys NULL (arrays never set keys) and atoi(NULL) crashes two
+     * lines below; a scalar silently yields zero specials. */
+    if (adt->t != J_OBJ) {
+        fprintf(stderr, "k3_tok: added_tokens_decoder is not an object\n");
+        exit(1);
+    }
 
     T->nsp = adt->len;
     T->sp  = (Special *)calloc((size_t)(T->nsp ? T->nsp : 1), sizeof(Special));

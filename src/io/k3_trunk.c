@@ -151,6 +151,9 @@ int k3_trunk_open(K3Trunk *tr, const char *dir, const K3Cfg *c, int64_t budget_b
     jval *jl = json_get(root, "layers");
     if (!jl || jl->t != J_ARR) { fprintf(stderr, "k3_trunk: no layers array\n"); goto bad; }
     tr->n_layers = jl->len;
+    /* An empty layers array used to reach the ring sizing below, which reads
+     * lay[n_layers - 1] = lay[-1]. A trunk with no layers is not a trunk. */
+    if (tr->n_layers <= 0) { fprintf(stderr, "k3_trunk: no layers\n"); goto bad; }
     tr->lay = (K3TrunkLayer *)calloc((size_t)tr->n_layers, sizeof(K3TrunkLayer));
     if (!tr->lay) goto bad;
 
@@ -160,6 +163,13 @@ int k3_trunk_open(K3Trunk *tr, const char *dir, const K3Cfg *c, int64_t budget_b
         K3TrunkLayer *L = &tr->lay[i];
         if ((v = json_get(e, "file_off")) && v->t == J_NUM) L->file_off = (int64_t)v->num;
         if ((v = json_get(e, "nbytes"))   && v->t == J_NUM) L->nbytes   = (int64_t)v->num;
+        /* A hostile trunk.json can carry negative geometry. Negative file_off
+         * turns the pread offset backwards; negative nbytes skips the load
+         * loop entirely and hands uninitialized heap to the kernels. */
+        if (L->file_off < 0 || L->nbytes < 0) {
+            fprintf(stderr, "k3_trunk: layer %d has negative geometry\n", i);
+            goto bad;
+        }
         jval *ts = json_get(e, "tensors");
         if (!ts || ts->t != J_OBJ) { fprintf(stderr, "k3_trunk: layer %d has no tensors\n", i); goto bad; }
         L->nt = ts->len;
@@ -167,15 +177,31 @@ int k3_trunk_open(K3Trunk *tr, const char *dir, const K3Cfg *c, int64_t budget_b
         if (!L->t) goto bad;
         for (int k = 0; k < ts->len; k++) {
             K3TrunkTensor *t = &L->t[k];
-            /* keys live in the parser arena, which is kept for the process lifetime */
-            t->name = ts->keys[k];
+            /* Names are strdup'd: the parse tree is freed below, and every
+             * parser string is individually heap-owned (see json_free_tree),
+             * so aliasing a tree string would dangle at the first verify. */
+            t->name = ts->keys[k] ? strdup(ts->keys[k]) : NULL;
+            if (ts->keys[k] && !t->name) goto bad;
             jval *o = ts->kids[k];
             if ((v = json_get(o, "off"))    && v->t == J_NUM) t->off    = (int64_t)v->num;
             if ((v = json_get(o, "nbytes")) && v->t == J_NUM) t->nbytes = (int64_t)v->num;
             if ((v = json_get(o, "dtype"))  && v->t == J_STR) t->dtype  = dt_of(v->str);
+            /* The binder trusts these offsets into the layer run. A hostile
+             * manifest can point a tensor at bytes outside the run (or wrap
+             * off+nbytes around int64), handing kernels an arbitrary
+             * heap-adjacent read. Refuse at parse time, overflow-safe. */
+            if (t->off < 0 || t->nbytes < 0 || t->off > L->nbytes ||
+                t->nbytes > L->nbytes - t->off) {
+                fprintf(stderr, "k3_trunk: layer %d tensor '%s' escapes its run\n",
+                        i, t->name ? t->name : "?");
+                goto bad;
+            }
         }
     }
-    free(txt);                      /* arena holds the strings; txt itself is done */
+    /* The trunk.json tree stays alive through the align lookup below; it is
+     * freed right after. Offsets/counts are already copied out and every
+     * tensor name was strdup'd above, so nothing retained dangles. */
+    free(txt);
 
     snprintf(p, sizeof p, "%s/trunk.bin", dir);
     /* O_DIRECT, because the trunk is the one thing the page cache CANNOT help with.
@@ -195,7 +221,11 @@ int k3_trunk_open(K3Trunk *tr, const char *dir, const K3Cfg *c, int64_t budget_b
         tr->direct = 0;
         tr->fd = open(p, O_RDONLY);
     }
-    if (tr->fd < 0) { fprintf(stderr, "k3_trunk: cannot open %s\n", p); return -1; }
+    if (tr->fd < 0) {
+        fprintf(stderr, "k3_trunk: cannot open %s\n", p);
+        json_free_tree(root);
+        return -1;
+    }
     {
         jval *a = json_get(root, "align");
         const int64_t want = (a && a->t == J_NUM) ? (int64_t)a->num : 0;
@@ -208,9 +238,11 @@ int k3_trunk_open(K3Trunk *tr, const char *dir, const K3Cfg *c, int64_t budget_b
             close(tr->fd);
             tr->direct = 0;
             tr->fd = open(p, O_RDONLY);
-            if (tr->fd < 0) return -1;
+            if (tr->fd < 0) { json_free_tree(root); return -1; }
         }
     }
+    /* Last use of the trunk.json tree was the align lookup above. */
+    json_free_tree(root);
 
     const size_t widen = k3_bind_widen_bytes(c);
     int64_t total = 0;
@@ -449,7 +481,23 @@ int k3_trunk_open(K3Trunk *tr, const char *dir, const K3Cfg *c, int64_t budget_b
            "a pinned SET is used instead)\n", 100.0 * npin / tr->n_layers);
     return 0;
 bad:
+    /* Every open failure must leave nothing behind: partial layer tables and
+     * their strdup'd names are freed here, so a corrupt trunk.json fails the
+     * run without also failing a sanitizer. All pointers are NULL until
+     * assigned (memset at open), so freeing unconditionally is safe. */
     free(txt);
+    if (tr->lay) {
+        for (int i = 0; i < tr->n_layers; i++) {
+            for (int k = 0; k < tr->lay[i].nt; k++) free(tr->lay[i].t[k].name);
+            free(tr->lay[i].t);
+        }
+        free(tr->lay);
+        tr->lay = NULL;
+    }
+    free(tr->json_arena);
+    tr->json_arena = NULL;
+    memset(tr, 0, sizeof *tr);
+    tr->fd = -1;
     return -1;
 }
 
@@ -473,8 +521,14 @@ void k3_trunk_close(K3Trunk *tr)
     if (tr->pin) { for (int i = 0; i < tr->npin; i++) k3_aligned_free(tr->pin[i]); free(tr->pin); }
     k3_aligned_free(tr->arena); free(tr->layer_of); free(tr->slot_of); free(tr->pin_of);
     free(tr->reads_of);
-    if (tr->lay) { for (int i = 0; i < tr->n_layers; i++) free(tr->lay[i].t); free(tr->lay); }
-    free(tr->json_arena);   /* every K3TrunkTensor.name points into this */
+    if (tr->lay) {
+        for (int i = 0; i < tr->n_layers; i++) {
+            for (int k = 0; k < tr->lay[i].nt; k++) free(tr->lay[i].t[k].name);
+            free(tr->lay[i].t);
+        }
+        free(tr->lay);
+    }
+    free(tr->json_arena);   /* always NULL; the names above are owned individually */
     memset(tr, 0, sizeof *tr);
     tr->fd = -1;            /* see k3_trunk_open: 0 is stdin, not "closed" */
 }
@@ -523,7 +577,9 @@ static int k3_alloc_direct(void **out, size_t bytes)
  *
  * Timing and byte counts come back through out-parameters rather than being added to
  * the K3Trunk here: two threads call this concurrently now, and += on a shared double is
- * a data race whose symptom is a plausible-looking throughput figure. */
+ * a data race whose symptom is a plausible-looking throughput figure. The reader thread
+ * and the main thread both reach this function, so the fold-in has to happen under the
+ * io mutex, not here; see the "Fold one completed read" step below. */
 static int load_run_to(K3Trunk *tr, int L, unsigned char *dst,
                        double *secs, int64_t *bytes)
 {

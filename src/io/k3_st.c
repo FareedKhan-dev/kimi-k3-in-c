@@ -21,6 +21,7 @@
 
 #include <dirent.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -43,8 +44,16 @@ int k3_st_elemsize(K3Dtype d)
 
 int64_t k3_st_numel(const K3Tensor *t)
 {
+    /* Saturate instead of wrap: a hostile shape near INT64_MAX used to wrap
+     * n (signed overflow) and defeat the span check below with a small
+     * matching `want`. Saturation keeps every downstream comparison honest;
+     * no real tensor has 2^62 elements. */
     int64_t n = 1;
-    for (int i = 0; i < t->ndim; i++) n *= t->shape[i];
+    for (int i = 0; i < t->ndim; i++) {
+        if (t->shape[i] < 0) return (int64_t)INT64_MAX;
+        if (n > (int64_t)INT64_MAX / (t->shape[i] > 0 ? t->shape[i] : 1)) return (int64_t)INT64_MAX;
+        n *= t->shape[i];
+    }
     return t->ndim ? n : 1;
 }
 
@@ -124,8 +133,16 @@ static int i64_(Scan *s, int64_t *v)
     int neg = 0;
     if (s->p < s->end && (*s->p == '-' || *s->p == '+')) neg = (*s->p++ == '-');
     if (s->p >= s->end || *s->p < '0' || *s->p > '9') return 0;
+    /* Saturate on overflow: hostile data_offsets/shape near INT64_MAX used
+     * to wrap `a` small (signed overflow), defeating every check below. */
     int64_t a = 0;
-    while (s->p < s->end && *s->p >= '0' && *s->p <= '9') a = a * 10 + (*s->p++ - '0');
+    while (s->p < s->end && *s->p >= '0' && *s->p <= '9') {
+        int d = *s->p++ - '0';
+        if (a > (INT64_MAX - d) / 10) { a = INT64_MAX; }
+        else { a = a * 10 + d; }
+        /* keep consuming digits so the scanner stays aligned */
+    }
+    if (neg && a == INT64_MAX) { *v = INT64_MIN; return 1; }
     *v = neg ? -a : a;
     return 1;
 }
@@ -208,7 +225,12 @@ static int scan_shard(K3St *s, Build *b, int shard, const char *path)
     for (int i = 7; i >= 0; i--) hlen = (hlen << 8) | lenbuf[i];   /* little endian */
 
     off_t fsize = lseek(fd, 0, SEEK_END);
-    if (hlen == 0 || (uint64_t)fsize < 8 + hlen) {
+    /* Subtraction, not addition: 8 + hlen wraps to small when hlen is near
+     * 2^64 (a corrupt or hostile first 8 bytes), passing the check with a
+     * malloc(0) followed by a giant pread -- a heap overflow that _FORTIFY_
+     * turns into an abort. fsize >= 8 holds here (8 bytes were just read), so
+     * fsize - 8 cannot underflow. Found by tests/unit/test_st_faults.c. */
+    if (hlen == 0 || (uint64_t)(fsize - 8) < hlen) {
         fprintf(stderr, "k3_st: %s header length %llu is impossible (file %lld bytes)\n",
                 path, (unsigned long long)hlen, (long long)fsize);
         close(fd); return -1;
@@ -316,16 +338,30 @@ static int scan_shard(K3St *s, Build *b, int shard, const char *path)
         /* Consistency: the byte span must equal elements times element size. A mismatch
          * means the shape and the data disagree, and every later read of this tensor
          * would be silently misaligned. Refuse rather than load it. */
+        /* Negative offsets used to pass through (only presence was
+         * checked), and `base + o0` / `base + o1` could wrap int64, so a
+         * hostile data_offsets pair defeated both the span check and the
+         * EOF check. Order matters: bound o0/o1 BEFORE adding base.
+         * (fsize - base cannot underflow: base <= fsize was verified at
+         * the header check above.) */
+        if (o0 < 0 || o1 < o0 || o1 > fsize - base) {
+            fprintf(stderr, "k3_st: %s: %s has impossible data_offsets\n", path, name);
+            goto bad;
+        }
         t.off    = base + o0;
         t.nbytes = o1 - o0;
-        const int64_t want = k3_st_numel(&t) * k3_st_elemsize(t.dtype);
+        /* numel * esz can still wrap even with saturating numel (a hostile
+         * shape times 4 bytes). Check before multiplying. */
+        const int64_t numel = k3_st_numel(&t);
+        const int64_t esz = k3_st_elemsize(t.dtype);
+        if (esz <= 0 || numel > INT64_MAX / esz) {
+            fprintf(stderr, "k3_st: %s: %s shape is impossibly large\n", path, name);
+            goto bad;
+        }
+        const int64_t want = numel * esz;
         if (t.nbytes != want) {
             fprintf(stderr, "k3_st: %s: %s spans %lld bytes but shape implies %lld\n",
                     path, name, (long long)t.nbytes, (long long)want);
-            goto bad;
-        }
-        if (base + o1 > fsize) {
-            fprintf(stderr, "k3_st: %s: %s ends past EOF\n", path, name);
             goto bad;
         }
         if (o1 > maxend) maxend = o1;
@@ -373,9 +409,25 @@ int k3_st_open(K3St *s, const char *dir)
     while ((e = readdir(d))) {
         size_t n = strlen(e->d_name);
         if (n < 12 || strcmp(e->d_name + n - 12, ".safetensors")) continue;
-        if (nf == cf) { cf = cf ? cf * 2 : 32; files = (char **)realloc(files, cf * sizeof *files); }
+        if (nf == cf) {
+            cf = cf ? cf * 2 : 32;
+            char **nfiles = (char **)realloc(files, (size_t)cf * sizeof *files);
+            if (!nfiles) {
+                fprintf(stderr, "k3_st: OOM listing %s\n", dir);
+                for (int k = 0; k < nf; k++) free(files[k]);
+                free(files); closedir(d);
+                return -1;
+            }
+            files = nfiles;
+        }
         size_t len = strlen(dir) + 1 + n + 1;
         files[nf] = (char *)malloc(len);
+        if (!files[nf]) {
+            fprintf(stderr, "k3_st: OOM listing %s\n", dir);
+            for (int k = 0; k < nf; k++) free(files[k]);
+            free(files); closedir(d);
+            return -1;
+        }
         snprintf(files[nf], len, "%s/%s", dir, e->d_name);
         nf++;
     }

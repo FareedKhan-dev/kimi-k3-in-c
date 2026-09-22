@@ -156,7 +156,7 @@ CHAT_SRC   := src/chat/k3_chat.c src/chat/k3_sampler.c
 CLI_BIN    := $(BIN)/k3
 
 # Tests that need no checkpoint. These run in CI on every push.
-UNIT_TESTS := test_ops test_cache test_st test_model_stream test_cfg test_tok test_chat scale_test k3_model test_trunk
+UNIT_TESTS := test_ops test_cache test_st test_model_stream test_cfg test_tok test_chat scale_test k3_model test_trunk test_st_faults
 # Tests that need real shards. Built and run by `make test-all` with SHARD_DIR set;
 # see the weights-test target below.
 WEIGHT_TESTS := test_expert test_real_layer
@@ -200,6 +200,9 @@ $(BIN)/test_st: tests/unit/test_st.c $(BUILD)/src/io/k3_st.o | $(BIN)
 
 $(BIN)/test_model_stream: tests/unit/test_model_stream.c $(BUILD)/src/model/k3_bind.o \
                           $(BUILD)/src/io/k3_st.o $(BUILD)/src/core/k3_ops.o | $(BIN)
+	$(CC) $(CFLAGS) $(INCLUDES) $^ -o $@ $(LDFLAGS)
+
+$(BIN)/test_st_faults: tests/unit/test_st_faults.c $(BUILD)/src/io/k3_st.o | $(BIN)
 	$(CC) $(CFLAGS) $(INCLUDES) $^ -o $@ $(LDFLAGS)
 
 # The tokenizer and config reader are portable C99 with no OpenMP and no platform calls,
@@ -255,6 +258,7 @@ test: $(CLI_BIN) $(TEST_BINS)
 	@echo "== safetensors ==";       ./$(BIN)/test_st $(FIXTURES)/st $(BUILD)/st_index.json \
 	    plain.f32.2d plain.bf16.1d tricky.f16.1d packed.u8.2d scalar.f32 second.shard.f32
 	@echo "== model streaming ==";   ./$(BIN)/test_model_stream $(FIXTURES)/st
+	@echo "== shard faults ==";     ./$(BIN)/test_st_faults $(FIXTURES)/st $(BUILD)/stfault
 	@echo "== config reader ==";     ./$(BIN)/test_cfg fixture $(FIXTURES)/ref_k3.json
 	@echo "== config refusals =="; \
 	  for f in no_layermap bad_layer_index bad_topk; do \

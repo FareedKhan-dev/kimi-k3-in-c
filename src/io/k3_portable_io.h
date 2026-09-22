@@ -45,6 +45,10 @@
  *                  first failed on Windows. Windows gets MoveFileEx with
  *                  MOVEFILE_REPLACE_EXISTING, which has the POSIX semantics.
  *
+ *   mkdir          POSIX takes a path and a permission mode; the CRT's _mkdir takes
+ *                  only the path. Windows gets a wrapper that accepts and ignores the
+ *                  mode, used by test fixtures that build a scratch directory tree.
+ *
  * All four call sites fall back to buffered reads (or, for pread/posix_memalign, have
  * no fallback because the shim IS the implementation) when the direct path is
  * unavailable, so none of this changes what the engine computes, only how fast it
@@ -262,6 +266,20 @@ static inline int k3_win_rename(const char *from, const char *to)
     return -1;
 }
 #define rename(from, to) k3_win_rename((from), (to))
+
+/* mkdir(2) for MinGW. POSIX mkdir takes a path and a permission mode; the CRT's
+ * _mkdir (declared in direct.h, not the fcntl.h/io.h this file already pulls in)
+ * takes only the path, since Windows has no equivalent of the POSIX mode bits at
+ * create time. The mode argument is accepted and ignored rather than dropped at
+ * every call site, so test code written against the POSIX signature needs no
+ * platform branch of its own. */
+#include <direct.h>
+static inline int k3_win_mkdir(const char *path, int mode)
+{
+    (void)mode;
+    return _mkdir(path);
+}
+#define mkdir(path, mode) k3_win_mkdir((path), (mode))
 
 /* madvise(MADV_HUGEPAGE) is a Linux transparent-hugepage hint; every caller already
  * treats it as advisory ("failure is not an error" -- k3_trunk.c), so a no-op is the
