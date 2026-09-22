@@ -568,6 +568,14 @@ void k3_moe(float *out, const float *x, const K3MoeW *w, const K3Cfg *c,
     float *sact = sgu  + 2 * SI;        /* [SI]   shared after SiTU         */
     float *sdn  = sact + SI;            /* [E]    shared down-projection    */
 
+    /* Before the router has seen anything, tell the source we are here. It knows what
+     * this layer wanted last time and can start those reads now, so they overlap the
+     * router (896 dot products of length 7168) and the down-projection rather than
+     * beginning after them. A source without a guess leaves this NULL and nothing
+     * changes. Never on the draft path, which is defined by reading no new bytes. */
+    if (!w->cache_only && w->src && w->src->speculate)
+        w->src->speculate(w->src, w->layer);
+
     for (int t = 0; t < T; t++) {
         const float *xt = x + (size_t)t * E;
         float *ot = out + (size_t)t * E;
@@ -735,6 +743,9 @@ static void moe_prefill_chunk(float *out, const float *x, const K3MoeW *w,
     char *seen = (char *)calloc((size_t)c->n_experts, 1);
     if (!uniq || !seen) k3_fatal_oom("MoE prefill index", (size_t)c->n_experts);
     int nu = 0;
+    /* Same hint as the per-token path: routing has not happened yet and the source may
+     * have a guess worth starting now. */
+    if (w->src && w->src->speculate) w->src->speculate(w->src, w->layer);
     for (int t = 0; t < T; t++) {
         const float *xt = x + (size_t)t * E;
         int   *it = ridx + (size_t)t * K;
