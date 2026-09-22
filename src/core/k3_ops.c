@@ -761,6 +761,23 @@ static void moe_prefill_chunk(float *out, const float *x, const K3MoeW *w,
             k3_expert_drops++;
             fprintf(stderr, "EXPERT DROP: layer %d expert %d failed to load; "
                             "this chunk is CORRUPT\n", w->layer, e);
+            /* contrib is malloc'd, not calloc'd. The per-token path (k3_moe,
+             * above) starts its accumulator at zero and simply never adds a
+             * dropped expert's contribution, which is a correct zero. This
+             * batched path instead fills contrib per (token, slot) as each
+             * expert is processed, so skipping expert e here would leave
+             * every slot it was going to fill holding whatever malloc handed
+             * back, and step 3 below sums all of contrib unconditionally.
+             * Zero those slots so a drop here contributes zero exactly like
+             * the per-token path, instead of reading uninitialized memory
+             * into the model's output. */
+            for (int t = 0; t < T; t++) {
+                const int *it = ridx + (size_t)t * K;
+                for (int j = 0; j < K; j++)
+                    if (it[j] == e)
+                        memset(contrib + ((size_t)t * K + j) * Ll, 0,
+                               (size_t)Ll * sizeof(float));
+            }
             continue;
         }
         for (int t = 0; t < T; t++) {
