@@ -879,6 +879,10 @@ int main(int argc, char **argv)
         return 2;
     }
     const char *ids_s = NULL, *outp = "k3_run.json", *trunk_dir = NULL;
+    /* A run whose --out cannot be written used to exit 0 regardless, indistinguishable
+     * from a run that wrote its result. Latch the failure and report it once the rest
+     * of the run has already printed everything it can to stdout. */
+    int out_fail = 0;
     /* Expert-cache diagnostics are opt-in. They are only meaningful for cache research,
      * and writing them unconditionally drops two undeclared files into whatever
      * directory the user happened to run from. */
@@ -1162,6 +1166,15 @@ int main(int argc, char **argv)
         fprintf(stderr, "ABORTED: the model config could not be read with confidence.\n");
         return 2;
     }
+    /* --layers 0, or anything past the real layer count, used to fall through this
+     * check silently and run the full model, as if --layers had never been given. A
+     * partial stack is a deliberate test instrument; an out-of-range request is a
+     * typo, and a typo here should not look like a successful full-model run. */
+    if (want_layers != -1 && (want_layers < 1 || want_layers > c.n_layers)) {
+        fprintf(stderr, "--layers %d is out of range: want 1..%d\n",
+                want_layers, c.n_layers);
+        return 2;
+    }
     if (want_layers > 0 && want_layers < c.n_layers) {
         printf("NOTE: binding only the first %d of %d layers. Output is NOT the full "
                "model; it is a partial stack for testing the machinery.\n\n",
@@ -1273,7 +1286,20 @@ int main(int argc, char **argv)
             printf("  tokenized: %ld bytes -> %d ids\n", plen, np);
         } else {
             for (const char *p = ids_s; *p && np < K3_MAX_PROMPT; ) {
-                prompt[np++] = (int)strtol(p, (char **)&p, 10);
+                /* strtol with no endptr check spins on garbage: "abc" never advances
+                 * p, so the loop makes no progress and, because id 0 is exactly what
+                 * a failed strtol call returns, silently fills the prompt with zeros
+                 * instead of refusing it. Require each piece to parse as a whole
+                 * integer ending at a separator or the string's end. */
+                char *end = NULL;
+                const long v = strtol(p, &end, 10);
+                if (end == p || (*end != ',' && *end != ' ' && *end != '\0')) {
+                    fprintf(stderr, "bad --ids: '%s' is not a comma separated list of "
+                                    "integers\n", ids_s);
+                    return 2;
+                }
+                prompt[np++] = (int)v;
+                p = end;
                 while (*p == ',' || *p == ' ') p++;
             }
         }
@@ -1976,6 +2002,10 @@ int main(int argc, char **argv)
     k3_cache_report(&cache, "final step");
 
     FILE *f = fopen(outp, "w");
+    if (!f) {
+        fprintf(stderr, "cannot write %s\n", outp);
+        out_fail = 1;
+    }
     if (f) {
         fprintf(f, "{\"prompt_ids\":[");
         for (int i = 0; i < np; i++) fprintf(f, "%s%d", i ? "," : "", prompt[i]);
@@ -2077,5 +2107,6 @@ int main(int argc, char **argv)
                 "the shard set or the storage is at fault.\n", k3_expert_drops);
         return 4;
     }
+    if (out_fail) return 3;
     return 0;
 }
