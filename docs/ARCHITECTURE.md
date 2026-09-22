@@ -65,8 +65,12 @@ src/model/
 src/tokenizer/
   k3_tok.h        loads the released tiktoken.model directly
 
+src/chat/
+  k3_chat.c       strict JSONL transcripts and official XTML segment rendering
+  k3_sampler.c    deterministic PCG32 temperature/top-p sampling
+
 src/cli/
-  k3_run.c        the k3 binary
+  k3_run.c        batch CLI plus the text-only chat REPL
 ```
 
 ## Attention: two mechanisms

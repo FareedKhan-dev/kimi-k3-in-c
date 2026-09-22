@@ -118,7 +118,20 @@ endif()
 # ------------------------------------------------------------------------------ cli --
 add_executable(k3_cli src/cli/k3_run.c)
 set_target_properties(k3_cli PROPERTIES OUTPUT_NAME k3)
-target_link_libraries(k3_cli PRIVATE k3)
+
+# Chat is deliberately separate from the inference library: it is CLI policy and
+# transcript handling, not a new framework or a second execution backend.
+add_library(k3_chat STATIC src/chat/k3_chat.c src/chat/k3_sampler.c)
+target_include_directories(k3_chat PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/chat
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/tokenizer
+  ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
+# k3_chat.c includes k3_portable_io.h for the fsync/rename shims its history writer
+# uses on Windows. The Makefile passes -Isrc/io to everything; here only this target
+# needs it, and privately, so the chat library's public surface stays src/chat.
+target_include_directories(k3_chat PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/io)
+target_link_libraries(k3_chat PUBLIC k3_flags m)
+target_link_libraries(k3_cli PRIVATE k3 k3_chat)
 
 # ---------------------------------------------------------------------------- tests --
 # Every test below runs WITHOUT model weights. The checkpoint is 1.56 TB; if correctness
@@ -136,6 +149,8 @@ k3_add_test(test_st     tests/unit/test_st.c)
 k3_add_test(test_model_stream tests/unit/test_model_stream.c)
 k3_add_test(test_cfg    tests/unit/test_cfg.c)
 k3_add_test(test_tok    tests/unit/test_tok.c)
+k3_add_test(test_chat   tests/unit/test_chat.c)
+target_link_libraries(test_chat PRIVATE k3_chat)
 k3_add_test(scale_test  tests/unit/scale_test.c)
 k3_add_test(test_trunk  tests/unit/test_trunk.c)
 k3_add_test(k3_model    tests/unit/k3_model.c)
@@ -151,6 +166,13 @@ add_test(NAME config     COMMAND test_cfg   fixture ${FIX}/ref_k3.json)
 add_test(NAME scale      COMMAND scale_test)
 add_test(NAME trunk      COMMAND test_trunk)
 add_test(NAME oracle     COMMAND k3_model   ${FIX})
+add_test(NAME chat_template
+         COMMAND ${CMAKE_COMMAND}
+                 -DTEST_CHAT=$<TARGET_FILE:test_chat>
+                 -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/run_chat_test.cmake)
+# Same contract as the tokenizer entry below: without this property a "SKIPPED:" run is
+# recorded as a pass, and a gate that cannot fail is worse than one that is absent.
+set_tests_properties(chat_template PROPERTIES SKIP_REGULAR_EXPRESSION "SKIPPED:")
 
 # The negative half of the config contract. Each fixture is the working flat config with
 # exactly one field mutated, so a rejection can only come from that field. Without these

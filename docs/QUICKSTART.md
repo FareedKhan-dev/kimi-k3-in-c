@@ -72,6 +72,17 @@ memory budget adjustable rather than fixed at ~115 GB.
 - `examples/`, runnable scripts, including one that proves output is identical across
   memory budgets
 
+For a text conversation rather than a raw continuation, use the official K3 XTML REPL:
+
+```bash
+./bin/k3 ~/k3model --trunk ~/k3trunk --preset desktop --tok ~/k3model \
+  --chat --system "You are a helpful assistant." \
+  --history my-session.jsonl --incremental
+```
+
+The JSONL transcript is portable but sensitive: it retains assistant `reasoning_content`
+as well as visible replies, because K3 needs that complete record for the next turn.
+
 ## Troubleshooting
 
 **"REFUSING: the KV cache for N positions needs X"**, the context you asked for does not
@@ -84,5 +95,5 @@ quadratic in sequence length. See [ROADMAP.md](ROADMAP.md).
 **"config could not be read with confidence"**, the reader found a config it does not
 fully understand and refused rather than guessing. The message lists every missing field.
 
-**Output is a continuation, not an answer**, correct. There is no chat template; the
-model completes your prompt.
+**Output is a continuation, not an answer**, use `--chat`; ordinary `--prompt` deliberately
+keeps raw-completion behavior for compatibility.
