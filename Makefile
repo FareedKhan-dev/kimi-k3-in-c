@@ -156,7 +156,7 @@ CHAT_SRC   := src/chat/k3_chat.c src/chat/k3_sampler.c
 CLI_BIN    := $(BIN)/k3
 
 # Tests that need no checkpoint. These run in CI on every push.
-UNIT_TESTS := test_ops test_cache test_st test_model_stream test_cfg test_tok test_chat scale_test k3_model test_trunk test_st_faults
+UNIT_TESTS := test_ops test_cache test_st test_model_stream test_cfg test_tok test_chat test_sampler scale_test k3_model test_trunk test_st_faults
 # Tests that need real shards. Built and run by `make test-all` with SHARD_DIR set;
 # see the weights-test target below.
 WEIGHT_TESTS := test_expert test_real_layer
@@ -211,6 +211,8 @@ $(BIN)/test_tok: tests/unit/test_tok.c | $(BIN)
 	$(CC) -O2 -std=c99 $(WARN) -Wno-unused-function $(INCLUDES) $< -o $@
 
 $(BIN)/test_chat: tests/unit/test_chat.c src/chat/k3_chat.c src/chat/k3_sampler.c | $(BIN)
+	$(CC) $(CFLAGS) -Wno-unused-function $(INCLUDES) $^ -o $@ $(LDFLAGS)
+$(BIN)/test_sampler: tests/unit/test_sampler.c src/chat/k3_sampler.c | $(BIN)
 	$(CC) $(CFLAGS) -Wno-unused-function $(INCLUDES) $^ -o $@ $(LDFLAGS)
 
 $(BIN)/test_cfg: tests/unit/test_cfg.c src/core/k3_ops.c | $(BIN)
@@ -290,6 +292,7 @@ test: $(CLI_BIN) $(TEST_BINS)
 	      echo "           the XTML template is checked against the released tokenizer,"; \
 	      echo "           which ships with the checkpoint. Run: make test TOK_FILES=/path/to/k3model"; \
 	  fi
+	@echo "== sampler ==";          ./$(BIN)/test_sampler
 	@echo "== real dimensions ==";   ./$(BIN)/scale_test
 	@echo "== trunk streaming ==";   ./$(BIN)/test_trunk
 	@echo "== full-model oracle =="; ./$(BIN)/k3_model $(FIXTURES)

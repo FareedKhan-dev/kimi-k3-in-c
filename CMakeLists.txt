@@ -152,6 +152,8 @@ k3_add_test(test_tok    tests/unit/test_tok.c)
 k3_add_test(test_chat   tests/unit/test_chat.c)
 k3_add_test(test_st_faults tests/unit/test_st_faults.c)
 target_link_libraries(test_chat PRIVATE k3_chat)
+k3_add_test(test_sampler tests/unit/test_sampler.c)
+target_link_libraries(test_sampler PRIVATE k3_chat)
 k3_add_test(scale_test  tests/unit/scale_test.c)
 k3_add_test(test_trunk  tests/unit/test_trunk.c)
 k3_add_test(k3_model    tests/unit/k3_model.c)
@@ -188,6 +190,7 @@ add_test(NAME config_reject_bad_topk
 add_test(NAME safetensors COMMAND test_st   ${FIX}/st ${CMAKE_CURRENT_BINARY_DIR}/idx.json
          plain.f32.2d plain.bf16.1d tricky.f16.1d packed.u8.2d scalar.f32 second.shard.f32)
 add_test(NAME shard_faults COMMAND test_st_faults ${FIX}/st ${CMAKE_CURRENT_BINARY_DIR}/stfault)
+add_test(NAME sampler COMMAND test_sampler)
 add_test(NAME model_stream COMMAND test_model_stream ${FIX}/st)
 add_test(NAME ultra_cli_contract
          COMMAND ${CMAKE_COMMAND} -DCLI=$<TARGET_FILE:k3_cli>
