@@ -236,6 +236,9 @@ $(BIN)/test_trunk: tests/unit/test_trunk.c $(BUILD)/src/io/k3_trunk.o \
 $(BIN)/bench_kernels: benchmarks/bench_kernels.c $(BUILD)/src/core/k3_ops.o | $(BIN)
 	$(CC) $(CFLAGS) $(INCLUDES) $^ -o $@ $(LDFLAGS)
 
+$(BIN)/bench_batch: benchmarks/bench_batch.c $(BUILD)/src/core/k3_ops.o | $(BIN)
+	$(CC) $(CFLAGS) $(INCLUDES) $^ -o $@ $(LDFLAGS)
+
 ## test: everything that needs no model weights
 test: $(CLI_BIN) $(TEST_BINS)
 	@echo "== ultra CLI contract =="; \
@@ -334,8 +337,9 @@ cfg: $(BIN)/test_cfg
 	    || echo "  (skipped real config: none at $(TOK_FILES))"
 
 ## bench: kernel microbenchmarks, no weights required
-bench: $(BIN)/bench_kernels
+bench: $(BIN)/bench_kernels $(BIN)/bench_batch
 	./$(BIN)/bench_kernels
+	./$(BIN)/bench_batch
 
 ## portable: drop the -march/-mcpu=native tuning, for a distributable binary
 # On x86-64 that means a generic AVX2 + FMA baseline. On arm64 there is no equivalent
