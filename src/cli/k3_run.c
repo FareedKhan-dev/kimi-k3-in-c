@@ -58,6 +58,9 @@
 #else
 #include <sys/resource.h>
 #endif
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 #include "k3_portable_io.h"   /* getline() shim for MinGW; see the header for why */
 #include "k3.h"
@@ -338,6 +341,49 @@ static int spec_draft(const int *seq, int T, int cap, int *out)
 #define K3_VERSION "1.0.0"
 #endif
 
+/* The fraction of available memory a plan is allowed to occupy. The admission check and
+ * the auto budget MUST use the same number: auto sized itself to 98% of available while
+ * the check refused anything above 95%, and auto's flat 2 GB margin cannot cover that 3%
+ * gap once the machine is large. The effect was that auto always refused inside its own
+ * full-residency branch -- the case that branch calls "the configuration auto exists
+ * for" -- because entering it needs ~122 GB available, and by then 3% is over 3.7 GB. */
+#define K3_MEM_ADMIT 0.95
+
+#ifdef _OPENMP
+/* Physical cores, or 0 when the topology cannot be read.
+ *
+ * OpenMP's default is one thread per LOGICAL cpu, which on an SMT part is twice the core
+ * count. This workload loses badly at that setting: on a 16-core/32-thread machine the
+ * unbound 32-thread default measured 7.41 s/token against 5.63 at 16, because 32 threads
+ * migrating across two CCDs destroy locality on a 100+ GB working set. Counting cores
+ * needs the sibling topology; nothing in the C standard exposes it.
+ *
+ * A cpu is counted when it is the lowest-numbered member of its own sibling list, which
+ * yields exactly one cpu per physical core. */
+static int k3_physical_cores(void)
+{
+#if defined(__linux__)
+    int cores = 0;
+    for (int cpu = 0; cpu < 4096; cpu++) {
+        char path[128];
+        snprintf(path, sizeof path,
+                 "/sys/devices/system/cpu/cpu%d/topology/thread_siblings_list", cpu);
+        FILE *f = fopen(path, "r");
+        if (!f) {
+            if (cpu == 0) return 0;   /* no topology at all: caller keeps the default */
+            break;                    /* ran off the end of the online cpus */
+        }
+        int first = -1;
+        if (fscanf(f, "%d", &first) == 1 && first == cpu) cores++;
+        fclose(f);
+    }
+    return cores;
+#else
+    return 0;
+#endif
+}
+#endif /* _OPENMP */
+
 static void usage(FILE *f)
 {
     fprintf(f,
@@ -363,6 +409,10 @@ static void usage(FILE *f)
 "                        the reader run a layer further ahead and costs one more slot\n"
 "                        of RAM; the budget still wins if it does not fit\n"
 "  --cache-gb X          routed-expert cache budget\n"
+"  --threads N           OpenMP threads. Default is the physical core count, not the\n"
+"                        logical cpu count OpenMP would otherwise pick: on an SMT part\n"
+"                        the extra threads migrate across cores and cost more than they\n"
+"                        add. OMP_NUM_THREADS, if set, still wins\n"
 "  --ultra-low-memory    stream embedding rows and lm_head chunks, and reuse one\n"
 "                        recurrent-state slot during full recompute; needs --trunk\n"
 "\n"
@@ -908,6 +958,7 @@ int main(int argc, char **argv)
     const char *preset_name = NULL;
     int incremental = 0, ultra = 0, chat = 0, greedy = 0;
     int trunk_ring = 0;   /* 0 selects k3_trunk_open's default of 2 */
+    int threads = 0;      /* 0 = choose a default; see thread selection below */
     K3ChatOptions chat_opts = k3_chat_options_default();
     int no_think = 0, effort_set = 0;
     int temperature_set = 0, top_p_set = 0, seed_set = 0, out_set = 0;
@@ -957,6 +1008,7 @@ int main(int argc, char **argv)
             else { trunk_gb = atof(v); budget_auto = 0; }
         }
         else if (!strcmp(argv[i], "--trunk-ring") && i + 1 < argc) trunk_ring = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--threads") && i + 1 < argc) threads = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--incremental")) incremental = 1;
         else if (!strcmp(argv[i], "--ultra-low-memory")) ultra = 1;
         else if (!strcmp(argv[i], "--chat")) chat = 1;
@@ -1006,6 +1058,23 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) { usage(stdout); return 0; }
         else { fprintf(stderr, "unknown option %s\n\n", argv[i]); usage(stderr); return 2; }
     }
+
+#ifdef _OPENMP
+    /* Thread selection, in precedence order: --threads, then OMP_NUM_THREADS, then the
+     * physical core count. Only the last is a change from OpenMP's own default, which is
+     * one thread per logical cpu. An explicit OMP_NUM_THREADS is left alone so existing
+     * scripts and the docs that mention it keep working. */
+    if (threads > 0) {
+        omp_set_num_threads(threads);
+    } else if (!getenv("OMP_NUM_THREADS")) {
+        const int cores = k3_physical_cores();
+        if (cores > 0 && cores < omp_get_max_threads()) omp_set_num_threads(cores);
+    }
+    printf("threads: %d\n", omp_get_max_threads());
+#else
+    if (threads > 0)
+        fprintf(stderr, "--threads ignored: built without OpenMP\n");
+#endif
 
     if (ultra && !trunk_dir) {
         fprintf(stderr, "--ultra-low-memory needs --trunk; resident trunk cannot fit its "
@@ -1104,9 +1173,10 @@ int main(int argc, char **argv)
             return 2;
         }
         /* Fixed costs outside both budgets: embeddings + lm_head 4.70 GB, safetensors
-         * index, recurrent state 0.63 GB, KV cache and scratch. Reserve them plus a
-         * 2 GB + 2% margin so auto never invites the OOM killer. */
-        const double reserve = 2.0 + 0.02 * (avail / 1e9) + 4.70 + 1.70;
+         * index, recurrent state 0.63 GB, KV cache and scratch. Reserve them, plus the
+         * same headroom the admission check enforces, plus 2 GB for buffers and the KV
+         * cache, which are not known until the config is loaded further down. */
+        const double reserve = 2.0 + (1.0 - K3_MEM_ADMIT) * (avail / 1e9) + 4.70 + 1.70;
         double usable = avail / 1e9 - reserve;
         const double slot_min = 2.5;   /* one ring slot + headroom; refuse below */
         const double cache_min = 0.5;  /* topk+1 expert slots is ~0.3 GB */
@@ -1454,13 +1524,19 @@ int main(int argc, char **argv)
         if (have > 0.0) {
             human(have, b1, sizeof b1);
             printf("  available        %s\n", b1);
-            if (need_b > have * 0.95) {
-                human(need_b - have, b2, sizeof b2);
+            if (need_b > have * K3_MEM_ADMIT) {
+                /* Against the ceiling actually enforced, not against `have`: the check
+                 * fires between the ceiling and 100%, where need_b - have is negative
+                 * and the message read "a shortfall of -5.59 GB". */
+                char b8[32];
+                human(need_b - have * K3_MEM_ADMIT, b2, sizeof b2);
+                human(have * K3_MEM_ADMIT, b8, sizeof b8);
                 fprintf(stderr,
-                        "\nREFUSING TO START: this needs %s and the machine has %s "
-                        "available, a shortfall of %s.\n"
+                        "\nREFUSING TO START: this needs %s. The machine has %s available "
+                        "and a plan may use at most %s of that, so this is %s over the "
+                        "limit.\n"
                         "Options: a larger box, a smaller --cache-gb, or fewer --layers.\n",
-                        b6, b1, b2);
+                        b6, b1, b8, b2);
                 return 1;
             }
         }
