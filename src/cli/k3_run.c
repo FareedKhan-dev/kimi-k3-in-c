@@ -46,6 +46,7 @@
 
 #include <math.h>
 #include <errno.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -860,6 +861,23 @@ static int chat_run(Tok *tok, const K3ChatTemplate *tmpl, K3ChatHistory *history
     }
 }
 
+/* Strict argv integers. atoi("1junk") is 1 and a value past INT_MAX is
+ * undefined behaviour, so a typo would silently run with a different number
+ * than the one typed. The whole string must be an integer in int range;
+ * value semantics (like the --layers -1 sentinel) stay with the caller. */
+static int parse_int_strict(const char *s, int *out)
+{
+    char *end = NULL;
+    long v;
+    if (!s || !*s) return -1;
+    errno = 0;
+    v = strtol(s, &end, 10);
+    if (errno == ERANGE || end == s || *end != '\0' || v < INT_MIN || v > INT_MAX) return -1;
+    *out = (int)v;
+    return 0;
+}
+
+
 int main(int argc, char **argv)
 {
     /* Informational flags are answered before anything else, because they must work
@@ -942,7 +960,17 @@ int main(int argc, char **argv)
             }
         }
         else if (!strcmp(argv[i], "--cache-gb") && i + 1 < argc) cache_gb = atof(argv[++i]);
-        else if (!strcmp(argv[i], "--layers") && i + 1 < argc) want_layers = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--layers") && i + 1 < argc) {
+            /* Syntax here, range later: the range check needs the layer count
+             * from config.json, but "1junk" must not survive until then as a
+             * silent 1. "-1" still parses, so the not-given sentinel keeps
+             * working. */
+            if (parse_int_strict(argv[i + 1], &want_layers) != 0) {
+                fprintf(stderr, "--layers %s is not an integer\n", argv[i + 1]);
+                return 2;
+            }
+            i++;
+        }
         else if (!strcmp(argv[i], "--out") && i + 1 < argc) { outp = argv[++i]; out_set = 1; }
         else if (!strcmp(argv[i], "--trunk") && i + 1 < argc) trunk_dir = argv[++i];
         else if (!strcmp(argv[i], "--spec") && i + 1 < argc) spec_n = atoi(argv[++i]);
@@ -1290,10 +1318,14 @@ int main(int argc, char **argv)
                  * p, so the loop makes no progress and, because id 0 is exactly what
                  * a failed strtol call returns, silently fills the prompt with zeros
                  * instead of refusing it. Require each piece to parse as a whole
-                 * integer ending at a separator or the string's end. */
+                 * integer ending at a separator or the string's end. Values must
+                 * also fit an int: 4294967296 wraps to 0 on LP64, which is a real
+                 * token id, so the vocabulary check below would wave it through. */
                 char *end = NULL;
+                errno = 0;
                 const long v = strtol(p, &end, 10);
-                if (end == p || (*end != ',' && *end != ' ' && *end != '\0')) {
+                if (errno == ERANGE || end == p || v < INT_MIN || v > INT_MAX ||
+                    (*end != ',' && *end != ' ' && *end != '\0')) {
                     fprintf(stderr, "bad --ids: '%s' is not a comma separated list of "
                                     "integers\n", ids_s);
                     return 2;
