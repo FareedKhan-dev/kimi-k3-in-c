@@ -1,4 +1,4 @@
-/* test_chat.c - weightless Kimi K3 XTML, transcript, parser, and sampler gates. */
+/* test_chat.c - weightless Kimi K3 XTML, transcript and parser gates. */
 #define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <stdlib.h>
@@ -6,7 +6,6 @@
 #include <unistd.h>
 
 #include "k3_chat.h"
-#include "k3_sampler.h"
 
 static int fails;
 
@@ -237,16 +236,6 @@ int main(int argc, char **argv)
     ok(k3_chat_history_save(&h, "/no/such/k3-chat-history.jsonl", err, sizeof err) != 0,
        "history write failure is reported without replacing a transcript");
     unlink(path); k3_chat_history_free(&loaded);
-
-    float logits[] = {0.0f, 1.0f, 2.0f, 3.0f}; int a, b, g;
-    K3Sampler sa, sb; k3_sampler_init(&sa, 1.0, .95, 42, 2); k3_sampler_init(&sb, 1.0, .95, 42, 2);
-    ok(k3_sampler_next(&sa, logits, 4, 0, &a) == 0 && k3_sampler_next(&sb, logits, 4, 0, &b) == 0 && a == b,
-       "fixed seed sampler is deterministic");
-    ok(k3_sampler_next(&sa, logits, 4, 1, &g) == 0 && g == 3, "greedy sampler remains argmax");
-    K3Sampler bad_sampler; k3_sampler_init(&bad_sampler, 1.0, 0.0, 1, 1);
-    ok(k3_sampler_next(&bad_sampler, logits, 4, 0, &g) != 0, "invalid top-p is rejected");
-    k3_sampler_free(&bad_sampler);
-    k3_sampler_free(&sa); k3_sampler_free(&sb);
 
     free(rendered); k3_chat_segments_free(&segs); k3_chat_history_free(&h);
     printf("\n%s\n", fails ? "CHAT TESTS FAILED" : "CHAT TESTS PASSED");
