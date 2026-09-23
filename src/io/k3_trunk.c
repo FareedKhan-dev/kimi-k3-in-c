@@ -485,6 +485,7 @@ bad:
      * their strdup'd names are freed here, so a corrupt trunk.json fails the
      * run without also failing a sanitizer. All pointers are NULL until
      * assigned (memset at open), so freeing unconditionally is safe. */
+    json_free_tree(root);
     free(txt);
     if (tr->lay) {
         for (int i = 0; i < tr->n_layers; i++) {
