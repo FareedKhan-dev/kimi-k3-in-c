@@ -338,6 +338,14 @@ static int spec_draft(const int *seq, int T, int cap, int *out)
 #define K3_VERSION "1.0.0"
 #endif
 
+/* The fraction of available memory a plan is allowed to occupy. The admission check and
+ * the auto budget MUST use the same number: auto sized itself to 98% of available while
+ * the check refused anything above 95%, and auto's flat 2 GB margin cannot cover that 3%
+ * gap once the machine is large. The effect was that auto always refused inside its own
+ * full-residency branch -- the case that branch calls "the configuration auto exists
+ * for" -- because entering it needs ~122 GB available, and by then 3% is over 3.7 GB. */
+#define K3_MEM_ADMIT 0.95
+
 static void usage(FILE *f)
 {
     fprintf(f,
@@ -1104,9 +1112,10 @@ int main(int argc, char **argv)
             return 2;
         }
         /* Fixed costs outside both budgets: embeddings + lm_head 4.70 GB, safetensors
-         * index, recurrent state 0.63 GB, KV cache and scratch. Reserve them plus a
-         * 2 GB + 2% margin so auto never invites the OOM killer. */
-        const double reserve = 2.0 + 0.02 * (avail / 1e9) + 4.70 + 1.70;
+         * index, recurrent state 0.63 GB, KV cache and scratch. Reserve them, plus the
+         * same headroom the admission check enforces, plus 2 GB for buffers and the KV
+         * cache, which are not known until the config is loaded further down. */
+        const double reserve = 2.0 + (1.0 - K3_MEM_ADMIT) * (avail / 1e9) + 4.70 + 1.70;
         double usable = avail / 1e9 - reserve;
         const double slot_min = 2.5;   /* one ring slot + headroom; refuse below */
         const double cache_min = 0.5;  /* topk+1 expert slots is ~0.3 GB */
@@ -1454,13 +1463,19 @@ int main(int argc, char **argv)
         if (have > 0.0) {
             human(have, b1, sizeof b1);
             printf("  available        %s\n", b1);
-            if (need_b > have * 0.95) {
-                human(need_b - have, b2, sizeof b2);
+            if (need_b > have * K3_MEM_ADMIT) {
+                /* Against the ceiling actually enforced, not against `have`: the check
+                 * fires between the ceiling and 100%, where need_b - have is negative
+                 * and the message read "a shortfall of -5.59 GB". */
+                char b8[32];
+                human(need_b - have * K3_MEM_ADMIT, b2, sizeof b2);
+                human(have * K3_MEM_ADMIT, b8, sizeof b8);
                 fprintf(stderr,
-                        "\nREFUSING TO START: this needs %s and the machine has %s "
-                        "available, a shortfall of %s.\n"
+                        "\nREFUSING TO START: this needs %s. The machine has %s available "
+                        "and a plan may use at most %s of that, so this is %s over the "
+                        "limit.\n"
                         "Options: a larger box, a smaller --cache-gb, or fewer --layers.\n",
-                        b6, b1, b2);
+                        b6, b1, b8, b2);
                 return 1;
             }
         }
