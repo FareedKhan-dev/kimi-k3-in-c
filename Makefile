@@ -273,15 +273,15 @@ test: $(CLI_BIN) $(TEST_BINS)
 	          echo "           repository. Run: make tok TOK_FILES=/path/to/k3model"; \
 	 fi
 	@echo "== chat option contract =="; \
-	  for args in "--no-think" "--thinking-effort low" "--chat --thinking-effort medium" "--chat --no-think --thinking-effort low"; do \
+	  for args in "--no-think" "--thinking-effort low" "--chat --thinking-effort medium" "--chat --no-think --thinking-effort low" "--ids 1 --top-k 4"; do \
 	      out=$$(./$(CLI_BIN) fake $$args 2>&1); rc=$$?; \
 	      test $$rc -eq 2 || { echo "  k3 fake $$args returned $$rc, expected 2"; exit 1; }; \
-	      case "$$out" in *--no-think*|*--thinking-effort*) ;; \
+	      case "$$out" in *--no-think*|*--thinking-effort*|*--top-k*) ;; \
 	          *) echo "  '$$args' was refused, but not because of the thinking flags:"; \
 	             echo "      $$out"; \
 	             echo "  the model dir is 'fake', so the exit code alone would pass on the loader's error"; exit 1;; \
 	      esac; \
-	  done; echo "  4 misuses of --no-think/--thinking-effort refused, each for the right reason"
+	  done; echo "  5 misuses of thinking/sampling flags refused, each for the right reason"
 	@echo "== chat template =="; \
 	  if [ -f "$(TOK_FILES)/tiktoken.model" ]; then \
 	      ./$(BIN)/test_chat "$(TOK_FILES)"; \

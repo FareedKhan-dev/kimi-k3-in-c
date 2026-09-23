@@ -239,11 +239,64 @@ int main(int argc, char **argv)
     unlink(path); k3_chat_history_free(&loaded);
 
     float logits[] = {0.0f, 1.0f, 2.0f, 3.0f}; int a, b, g;
-    K3Sampler sa, sb; k3_sampler_init(&sa, 1.0, .95, 42, 2); k3_sampler_init(&sb, 1.0, .95, 42, 2);
+    K3Sampler sa, sb; k3_sampler_init(&sa, 1.0, .95, 0, 42, 2); k3_sampler_init(&sb, 1.0, .95, 0, 42, 2);
     ok(k3_sampler_next(&sa, logits, 4, 0, &a) == 0 && k3_sampler_next(&sb, logits, 4, 0, &b) == 0 && a == b,
        "fixed seed sampler is deterministic");
     ok(k3_sampler_next(&sa, logits, 4, 1, &g) == 0 && g == 3, "greedy sampler remains argmax");
-    K3Sampler bad_sampler; k3_sampler_init(&bad_sampler, 1.0, 0.0, 1, 1);
+    /* Top-k restriction: only the K best ids stay eligible. */
+    {
+        float kk[] = {0.0f, 1.0f, 2.0f, 3.0f};
+        K3Sampler s_full, s_wide, s_one, s_two, s_narrow, s_neg;
+        int same = 1, only_best = 1, in_window = 1, both = 0, seen2 = 0, seen3 = 0, i;
+        k3_sampler_init(&s_full, 1.0, .95, 0, 42, 2);
+        k3_sampler_init(&s_wide, 1.0, .95, 99, 42, 2);
+        for (i = 0; i < 20; i++) {
+            k3_sampler_next(&s_full, kk, 4, 0, &a);
+            k3_sampler_next(&s_wide, kk, 4, 0, &b);
+            if (a != b) same = 0;
+        }
+        ok(same, "top-k wider than the vocabulary matches disabled");
+        k3_sampler_free(&s_full);
+        k3_sampler_free(&s_wide);
+        k3_sampler_init(&s_one, 1.0, 1.0, 1, 7, 0);
+        for (i = 0; i < 200; i++) {
+            k3_sampler_next(&s_one, kk, 4, 0, &a);
+            if (a != 3) only_best = 0;
+        }
+        ok(only_best, "top-k 1 always picks the argmax");
+        k3_sampler_free(&s_one);
+        k3_sampler_init(&s_two, 1.0, 1.0, 2, 7, 0);
+        for (i = 0; i < 2000; i++) {
+            k3_sampler_next(&s_two, kk, 4, 0, &a);
+            if (a != 2 && a != 3) in_window = 0;
+            if (a == 2) seen2 = 1;
+            if (a == 3) seen3 = 1;
+        }
+        both = seen2 && seen3;
+        ok(in_window, "top-k 2 never picks outside the window");
+        ok(both, "top-k 2 still samples both survivors");
+        k3_sampler_free(&s_two);
+        k3_sampler_init(&s_narrow, 1.0, 0.5, 2, 7, 0);
+        only_best = 1;
+        for (i = 0; i < 200; i++) {
+            k3_sampler_next(&s_narrow, kk, 4, 0, &a);
+            if (a != 3) only_best = 0;
+        }
+        ok(only_best, "top-k then top-p keeps the nucleus inside the window");
+        k3_sampler_free(&s_narrow);
+        k3_sampler_init(&s_neg, 1.0, .95, -5, 42, 2);
+        k3_sampler_init(&s_full, 1.0, .95, 0, 42, 2);
+        same = 1;
+        for (i = 0; i < 20; i++) {
+            k3_sampler_next(&s_neg, kk, 4, 0, &a);
+            k3_sampler_next(&s_full, kk, 4, 0, &b);
+            if (a != b) same = 0;
+        }
+        ok(same, "negative top-k behaves as disabled");
+        k3_sampler_free(&s_neg);
+        k3_sampler_free(&s_full);
+    }
+    K3Sampler bad_sampler; k3_sampler_init(&bad_sampler, 1.0, 0.0, 0, 1, 1);
     ok(k3_sampler_next(&bad_sampler, logits, 4, 0, &g) != 0, "invalid top-p is rejected");
     k3_sampler_free(&bad_sampler);
     k3_sampler_free(&sa); k3_sampler_free(&sb);
