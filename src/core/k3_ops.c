@@ -859,12 +859,19 @@ void k3_kda_layer(float *out, const float *x, const K3KdaW *w, const K3Cfg *c,
     float *o  = bt + (size_t)T * H;      float *gb = o + (size_t)T * P;
     float *wr = gb + P;                  float *fa = wr + P;
 
-    /* 1. projections */
+    /* 1. projections
+     *
+     * q, k and v are the three largest matrices in the model at 176 MB each -- together
+     * 36.5 GB of the 72.4 GB of trunk DRAM traffic per token, measured from the packed
+     * trunk's own manifest. Batched, each is read ONCE for all T positions rather than T
+     * times. b, f_a and f_b stay per-token: they are 0.09-0.22 GB/token combined, and f_b
+     * consumes f_a's single shared scratch slot, so batching them would need a wider
+     * scratch for no measurable return. */
+    k3_mmw_batch(q, P, x, E, w->q, w->wdt, E, P, T);
+    k3_mmw_batch(k, P, x, E, w->k, w->wdt, E, P, T);
+    k3_mmw_batch(v, P, x, E, w->v, w->wdt, E, P, T);
     for (int t = 0; t < T; t++) {
         const float *xt = x + (size_t)t * E;
-        k3_mmw(q + (size_t)t * P, xt, w->q, w->wdt, E, P);
-        k3_mmw(k + (size_t)t * P, xt, w->k, w->wdt, E, P);
-        k3_mmw(v + (size_t)t * P, xt, w->v, w->wdt, E, P);
         k3_mmw(bt + (size_t)t * H, xt, w->b, w->wdt, E, H);
         /* ONE shared low-rank pair feeds every head: [E->D] then [D->H*D] */
         k3_mmw(fa, xt, w->f_a, w->wdt, E, D);
@@ -1218,6 +1225,115 @@ void k3_matmul_bf16(float *y, const float *x, const uint16_t *W, int in, int out
  * determinism contract (K3_WI8 is draft-only, and the exact model decides every emitted
  * token), so it accumulates in float with fused products and the natural AVX2 reduction,
  * which is what makes it fast. */
+/* Batched bf16 matmul: T activations against ONE weight matrix, weights read ONCE.
+ *
+ * WHY THIS EXISTS. Every matmul in this engine is matrix-times-VECTOR, so a T-position
+ * sweep calls it T times and re-reads the whole matrix T times. Measured on the released
+ * checkpoint: per-token DRAM traffic under --spec 8 was 341.2 GB against 363.4 GB serial,
+ * a ratio of 1.06 -- batching moved almost no bytes, because there was nothing batched to
+ * move them. The trunk is 108.81 GB per position and at T=1 each weight is used exactly
+ * once, an arithmetic intensity of 1 FLOP/byte, which is why the engine sits at roughly 6%
+ * of this CPU's arithmetic peak while saturating its memory bus.
+ *
+ * Reading the matrix once for T activations raises that intensity to T. Measured in
+ * isolation at the real KDA projection shape (7168 x 12288 bf16, working set far past the
+ * 96 MB V-Cache), for THIS kernel as it ships:
+ *
+ *     T        1      2      4      8     16
+ *     speedup  1.32x  1.46x  2.04x  2.29x  2.39x
+ *
+ * and DRAM reads for sixteen passes over a 176.2 MB matrix fall from 1925 MB to 179 MB,
+ * a factor of 10.8 -- the bytes really are read once.
+ *
+ * EXACTNESS COSTS MOST OF THE SPEED, and the honest comparison is worth stating: a
+ * prototype keeping ONE accumulator per output reached 5.58x at T=16, but it does not
+ * reproduce the serial kernel's reduction tree. Preserving that tree needs sixteen
+ * accumulators PER ACTIVATION, 2 KB per output row at T=16, which spills out of registers
+ * and costs more than half the gain. 2.39x that passes the oracle beats 5.58x that
+ * does not.
+ *
+ * WHAT IT IS WORTH IN THE ENGINE, measured end to end rather than inferred from the
+ * kernel: wired into the three KDA projections it removes 19.4% of prefill DRAM traffic
+ * (4858 -> 3918 GB) for NO time gain, because prefill is compute-bound, not bandwidth-bound;
+ * and it is worth about 1% on speculative decode, where T > 1, and nothing at all on plain
+ * decode, where T = 1 and there is nothing to batch. It is a bandwidth optimisation, so it
+ * pays only where bandwidth is the binding constraint.
+ *
+ * BIT-EXACTNESS IS NOT OPTIONAL AND IS PRESERVED BY CONSTRUCTION. Each output element
+ * keeps its own sixteen double accumulators and sees exactly the fma sequence the
+ * single-vector kernel would apply, in the same order, with the same final reduction tree.
+ * Only the LOOP NEST changes: the weight load is hoisted out of the T loop. Since
+ * k3_matmul_bf16's AVX2 and NEON forms are already bitwise identical to its scalar form
+ * (test_ops asserts it), matching the scalar form here matches all of them.
+ *
+ * ACTIVATIONS ARE PACKED FIRST, and that is not a detail. Addressing x[t*xstride + i]
+ * directly puts the T values for one i a whole row apart -- at hidden=7168 that is 28 KB
+ * between consecutive accesses, T scattered cache lines per step. Measured on the
+ * one-accumulator prototype, where the effect is clearest: the unpacked form peaks at
+ * 1.84x and then REGRESSES to 1.12x at T=16, while the packed form reaches 5.58x. Same
+ * arithmetic, same instruction count; only the operand layout differs.
+ */
+void k3_matmul_bf16_batch(float *y, int ystride, const float *x, int xstride,
+                          const uint16_t *W, int in, int out, int T)
+{
+    /* K3_NOBATCH=1 forces the serial path, so one binary can be A/B'd against itself.
+     * Same reason K3_NOPREFETCH and K3_NOHUGE exist: comparing two builds compares two
+     * binaries, comparing one binary under two settings compares one decision. */
+    static int disabled = -1;
+    if (disabled < 0) disabled = getenv("K3_NOBATCH") ? 1 : 0;
+
+    if (T <= 1 || disabled) {
+        for (int t = 0; t < T; t++)
+            k3_matmul_bf16(y + (size_t)t * ystride, x + (size_t)t * xstride, W, in, out);
+        return;
+    }
+
+    /* [in][T] so the T activations for one input index are contiguous. */
+    float *xp = (float *)malloc((size_t)in * (size_t)T * sizeof(float));
+    if (!xp) {                      /* fall back rather than fail: same answer, slower */
+        for (int t = 0; t < T; t++)
+            k3_matmul_bf16(y + (size_t)t * ystride, x + (size_t)t * xstride, W, in, out);
+        return;
+    }
+    for (int t = 0; t < T; t++) {
+        const float *xt = x + (size_t)t * xstride;
+        for (int i = 0; i < in; i++) xp[(size_t)i * T + t] = xt[i];
+    }
+
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if (out > 64)
+#endif
+    for (int o = 0; o < out; o++) {
+        const uint16_t *row = W + (size_t)o * in;
+        /* a[t][l]: the same sixteen accumulators k3_matmul_bf16 keeps, one set per
+         * activation. K3_BATCH_MAX bounds the stack frame. */
+        double a[K3_BATCH_MAX][16];
+        for (int t = 0; t < T; t++)
+            for (int l = 0; l < 16; l++) a[t][l] = 0.0;
+
+        int i = 0;
+        for (; i + 15 < in; i += 16) {
+            for (int l = 0; l < 16; l++) {
+                const double w = (double)k3_bf16f(row[i + l]);
+                const float *xi = xp + (size_t)(i + l) * T;
+                for (int t = 0; t < T; t++)
+                    a[t][l] = fma(w, (double)xi[t], a[t][l]);
+            }
+        }
+        for (int t = 0; t < T; t++) {
+            const double b0 = (a[t][0] + a[t][4]) + (a[t][8]  + a[t][12]);
+            const double b1 = (a[t][1] + a[t][5]) + (a[t][9]  + a[t][13]);
+            const double b2 = (a[t][2] + a[t][6]) + (a[t][10] + a[t][14]);
+            const double b3 = (a[t][3] + a[t][7]) + (a[t][11] + a[t][15]);
+            double acc = (b0 + b1) + (b2 + b3);
+            for (int k = i; k < in; k++)      /* the same ragged tail, in the same order */
+                acc = fma((double)k3_bf16f(row[k]), (double)x[(size_t)t * xstride + k], acc);
+            y[(size_t)t * ystride + o] = (float)acc;
+        }
+    }
+    free(xp);
+}
+
 void k3_matmul_q8(float *y, const float *x, const void *W, int in, int out)
 {
     const unsigned char *base = (const unsigned char *)W;

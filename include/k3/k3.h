@@ -280,6 +280,21 @@ static inline float k3_bf16f(uint16_t h)
 
 void k3_matmul_bf16(float *y, const float *x, const uint16_t *W, int in, int out);
 
+/* Upper bound on activations per batched matmul. Bounds the per-output-row accumulator
+ * block in k3_matmul_bf16_batch, which is 16 doubles per activation. */
+#define K3_BATCH_MAX 16
+
+/* Batched bf16 matmul: T activations against ONE weight matrix, read ONCE.
+ *
+ * Bitwise identical to calling k3_matmul_bf16 T times -- each output element keeps its own
+ * sixteen double accumulators and sees the same fma sequence in the same order, with the
+ * same reduction tree. Only the loop nest changes, hoisting the weight load out of the T
+ * loop, which is what turns an arithmetic intensity of 1 FLOP/byte into T.
+ *
+ * y[t*ystride + o] and x[t*xstride + i]. T above K3_BATCH_MAX must be split by the caller. */
+void k3_matmul_bf16_batch(float *y, int ystride, const float *x, int xstride,
+                          const uint16_t *W, int in, int out, int T);
+
 /* Per-row int8 matmul for the draft model. W is `out` rows of [f32 scale][int8 * in].
  * No determinism contract (see K3_WI8): uses the fastest AVX2 form available. */
 void k3_matmul_q8(float *y, const float *x, const void *W, int in, int out);
@@ -292,6 +307,28 @@ static inline void k3_mmw(float *y, const float *x, const void *W, int wdt,
     if (wdt == K3_WBF16)     k3_matmul_bf16(y, x, (const uint16_t *)W, in, out);
     else if (wdt == K3_WI8)  k3_matmul_q8(y, x, W, in, out);
     else                     k3_matmul(y, x, (const float *)W, in, out);
+}
+
+/* Batched form of k3_mmw. Only bf16 has a batched kernel, which is the format 99% of the
+ * trunk is in; the others loop and are therefore unchanged, not merely unoptimised.
+ *
+ * Sequences longer than K3_BATCH_MAX are CHUNKED rather than rejected: prefill feeds the
+ * whole prompt at once, so falling back to the serial path there would skip the batching
+ * exactly where there is most of it to do. */
+static inline void k3_mmw_batch(float *y, int ystride, const float *x, int xstride,
+                                const void *W, int wdt, int in, int out, int T)
+{
+    if (wdt != K3_WBF16 || T <= 1) {
+        for (int t = 0; t < T; t++)
+            k3_mmw(y + (size_t)t * ystride, x + (size_t)t * xstride, W, wdt, in, out);
+        return;
+    }
+    for (int t0 = 0; t0 < T; t0 += K3_BATCH_MAX) {
+        const int n = (T - t0 < K3_BATCH_MAX) ? (T - t0) : K3_BATCH_MAX;
+        k3_matmul_bf16_batch(y + (size_t)t0 * ystride, ystride,
+                             x + (size_t)t0 * xstride, xstride,
+                             (const uint16_t *)W, in, out, n);
+    }
 }
 
 /* Byte stride of one row for a per-row int8 matrix: the f32 scale plus `in` int8 weights.

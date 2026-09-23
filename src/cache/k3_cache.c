@@ -109,6 +109,44 @@ static int admit(K3Cache *c, int layer, int expert)
     return slot;
 }
 
+/* Bytes per chunk of a split expert read. 1 MiB by default.
+ *
+ * Measured on the released checkpoint, trunk 114 GB / cache 2 GB, 16 threads bound to
+ * cores, steady-state decode. Same binary throughout, only this value changed:
+ *
+ *     chunk       per expert   s/token   expert GB/s
+ *     (unsplit)        1        5.602       11.14
+ *     4 MiB            5        5.402       11.96
+ *     2 MiB            9        5.325       12.26
+ *     1 MiB           17        5.281       12.40
+ *     512 KiB         34        5.286       12.34
+ *
+ * The curve turns at 512 KiB, so this is an optimum rather than a limit: past it the extra
+ * syscalls cost more than the improved balance saves. Generated token ids were identical at
+ * every point, which they must be -- the cache decides only whether bytes come from RAM or
+ * disk, never which experts the router chose.
+ *
+ * Overridable because the two existing A/B switches in this engine, K3_NOPREFETCH and
+ * K3_NOHUGE, exist for the same reason: comparing two BUILDS compares two binaries, while
+ * comparing one binary under two settings compares one decision. It also lets
+ * tests/unit/test_cache.c reach the chunked path at all -- the fixture's experts are
+ * 1,632 bytes, so at any sane default every fixture read takes the single-chunk fallback
+ * and the split would otherwise ship untested.
+ *
+ * Rounded up to K3_ST_ALIGN: O_DIRECT requires every offset and length to be a multiple
+ * of it, and the whole point of dividing the enclosing window is that each piece stays
+ * aligned. */
+static int64_t expert_chunk_bytes(void)
+{
+    static int64_t cached = 0;
+    if (cached) return cached;
+    const char *e = getenv("K3_EXPERT_CHUNK");
+    int64_t n = e ? strtoll(e, NULL, 10) : ((int64_t)1 << 20);
+    if (n < K3_ST_ALIGN) n = K3_ST_ALIGN;
+    cached = (n + K3_ST_ALIGN - 1) & ~(int64_t)(K3_ST_ALIGN - 1);
+    return cached;
+}
+
 /* Bring a whole top-k resident, with the reads issued CONCURRENTLY.
  *
  * The serial path admits one expert per call, so the drive sees a queue depth of one:
@@ -133,7 +171,11 @@ static int cache_getmany(K3ExpertSrc *self, int layer, const int *ids, int n)
     K3Cache *c = (K3Cache *)self;
     if (n <= 0) return 0;
 
-    typedef struct { int slot; int expert; K3ExpertRef r; int64_t got, pad; } Work;
+    typedef struct {
+        int slot; int expert; K3ExpertRef r; int64_t got, pad;
+        int64_t lo, len, chunk;   /* enclosing O_DIRECT window, divided into chunks */
+        int nchunk, cbase;
+    } Work;
     /* One entry per expert in a batch prefetch, so it is bounded by top-k. */
     Work w[K3_MAX_TOPK];
     int nw = 0;
@@ -179,20 +221,97 @@ static int cache_getmany(K3ExpertSrc *self, int layer, const int *ids, int n)
         w[j + 1] = t;
     }
 
-    /* ---- phase 2: read, concurrently ---- */
+    /* ---- phase 2: read, concurrently ----
+     *
+     * Each expert is divided into aligned chunks and the loop is flattened over
+     * (expert, chunk), so there are nw * nchunk work items rather than nw.
+     *
+     * WHY, and it is measured rather than supposed. With one item per expert and one
+     * thread per item, schedule(dynamic) has nothing left to balance: the layer cannot
+     * finish until the SLOWEST of the top-k reads does. fio on this machine, at exactly
+     * this pattern -- 17,547,264-byte O_DIRECT random reads, 16 concurrent, on the real
+     * shard files -- gives mean latency 19.55 ms against max 25.45 ms, a ratio of 1.30x.
+     * The engine sustained 11.11 GB/s where fio sustained 14.32 GB/s on the same files,
+     * and 1.29x of that shortfall is this tail. More, smaller items let a thread that
+     * finishes early take another, so the tail costs one chunk instead of one expert.
+     *
+     * Alignment is preserved by construction: the enclosing window [lo, hi) is computed
+     * once per expert and divided at multiples of K3_ST_ALIGN, so every chunk offset and
+     * length still satisfies O_DIRECT. Scattered (non-contiguous) experts keep the
+     * single-call path, which already issues six preads of its own.
+     */
+#define K3_EXPERT_ITEMS (K3_MAX_TOPK * 8)
+
+    const int64_t CH = expert_chunk_bytes();
+    int owner[K3_EXPERT_ITEMS], within[K3_EXPERT_ITEMS];
+    int64_t cgot[K3_EXPERT_ITEMS];
+    /* Chunks per expert are budgeted, not merely clamped.
+     *
+     * nw is NOT bounded by top-k here: moe_prefill_chunk passes the whole batch's unique
+     * expert set, so nw reaches K3_MAX_TOPK (64), and a small K3_EXPERT_CHUNK would then
+     * ask for 64 x 17 = 1088 items against these arrays. A per-expert cap of
+     * K3_EXPERT_ITEMS / nw keeps the total within bounds by construction and is always at
+     * least 8, because K3_EXPERT_ITEMS is 8 * K3_MAX_TOPK.
+     *
+     * The chunk SIZE is recomputed whenever the count is capped. Capping the count alone
+     * would leave the tail of the window unread, the payload short, and the slot released
+     * as a failed load -- a silent loss of an expert rather than a crash. */
+    const int max_per = (nw > 0) ? (K3_EXPERT_ITEMS / nw) : 1;
+    int nitem = 0;
+    for (int i = 0; i < nw; i++) {
+        int64_t ch = CH;
+        if (w[i].r.contiguous) {
+            w[i].lo  = w[i].r.off & ~(int64_t)(K3_ST_ALIGN - 1);
+            w[i].pad = w[i].r.off - w[i].lo;
+            w[i].len = ((w[i].r.off + w[i].r.nbytes + K3_ST_ALIGN - 1)
+                        & ~(int64_t)(K3_ST_ALIGN - 1)) - w[i].lo;
+            w[i].nchunk = (int)((w[i].len + ch - 1) / ch);
+            if (w[i].nchunk > max_per) {
+                ch = ((w[i].len + max_per - 1) / max_per + K3_ST_ALIGN - 1)
+                     & ~(int64_t)(K3_ST_ALIGN - 1);
+                w[i].nchunk = (int)((w[i].len + ch - 1) / ch);
+            }
+        } else {
+            w[i].lo = 0; w[i].pad = 0; w[i].len = 0; w[i].nchunk = 1;
+        }
+        w[i].chunk = ch;
+        w[i].cbase = nitem;
+        for (int ci = 0; ci < w[i].nchunk; ci++) {
+            owner[nitem] = i; within[nitem] = ci; cgot[nitem] = 0; nitem++;
+        }
+    }
+
     const double t0 = now_s();
 #ifdef _OPENMP
 #   pragma omp parallel for schedule(dynamic, 1)
 #endif
-    for (int i = 0; i < nw; i++) {
-        int64_t pad = 0;
-        const int64_t got = k3_expert_load_direct(
-            c->st, &w[i].r, c->arena + (size_t)w[i].slot * c->slot_bytes,
-            c->slot_bytes, &pad);
-        w[i].got = got;
-        w[i].pad = pad;
+    for (int k = 0; k < nitem; k++) {
+        const int i = owner[k];
+        unsigned char *dst = c->arena + (size_t)w[i].slot * c->slot_bytes;
+        if (!w[i].r.contiguous || w[i].nchunk == 1) {
+            int64_t pad = 0;
+            cgot[k] = k3_expert_load_direct(c->st, &w[i].r, dst, c->slot_bytes, &pad);
+            w[i].pad = pad;
+            continue;
+        }
+        const int64_t base = (int64_t)within[k] * w[i].chunk;
+        int64_t len = w[i].len - base;
+        if (len > w[i].chunk) len = w[i].chunk;
+        int64_t p = 0;
+        cgot[k] = k3_st_read_aligned(c->st, w[i].r.shard, w[i].lo + base, len,
+                                     dst + base, c->slot_bytes - base, &p);
     }
     c->load_seconds += now_s() - t0;
+
+    for (int i = 0; i < nw; i++) {
+        if (!w[i].r.contiguous || w[i].nchunk == 1) { w[i].got = cgot[w[i].cbase]; continue; }
+        int64_t tot = 0;
+        for (int ci = 0; ci < w[i].nchunk; ci++) tot += cgot[w[i].cbase + ci];
+        /* Chunks return window bytes from lo. Only the final chunk of a shard can be
+         * short at EOF, so the payload is covered exactly when tot reaches pad+nbytes --
+         * the same test k3_st_read_aligned applies to a whole-expert read. */
+        w[i].got = (tot >= w[i].pad + w[i].r.nbytes) ? w[i].r.nbytes : 0;
+    }
 
     /* ---- phase 3: publish only what actually arrived ---- */
     int ok = 0;
