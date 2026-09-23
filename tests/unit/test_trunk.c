@@ -24,6 +24,9 @@
  *                   proves the ring correctly recycles slots.
  *   6  FAILED-READ  truncating trunk.bin after open causes a prefetch to fail;
  *                   the slot is never published and bind returns an error.
+ *   7  REFUSAL      corrupt manifests (empty layers, negative geometry, a
+ *                   tensor escaping its run) are refused at open, with
+ *                   nothing left allocated behind them.
  *
  * usage: test_trunk
  *   writes a synthetic 3-layer trunk fixture to a temp directory, then drives
@@ -38,6 +41,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>            /* ftruncate */
 
 #include "k3.h"
@@ -537,6 +541,42 @@ static int test_truncated(const char *dir, const K3Cfg *c)
     return 0;
 }
 
+/* Corrupt manifests: open must refuse, and the refusal must clean up.
+ * Each trunk.json below fails a different parse-time check while the parsed
+ * tree is still alive, which is exactly the path that used to leak it. */
+static int test_bad_manifest(const char *dir, const K3Cfg *c)
+{
+    static const struct { const char *name; const char *json; } cases[] = {
+        { "empty layers", "{\"layers\":[]}" },
+        { "negative geometry",
+          "{\"layers\":[{\"file_off\":-5,\"nbytes\":64,\"tensors\":{}}]}" },
+        { "tensor escapes run",
+          "{\"layers\":[{\"file_off\":0,\"nbytes\":64,\"tensors\":"
+          "{\"w\":{\"off\":0,\"nbytes\":65,\"dtype\":\"F32\"}}}]}" },
+    };
+    char sub[1024], path[1024];
+    size_t i;
+    /* A directory of its own, so no fixture state is involved at all. */
+    if (snprintf(sub, sizeof sub, "%s/bad", dir) >= (int)sizeof sub) return 1;
+    mkdir(sub, 0755);
+    if (snprintf(path, sizeof path, "%s/trunk.json", sub) >= (int)sizeof path) return 1;
+    for (i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        FILE *f = fopen(path, "w");
+        K3Trunk tr;
+        int rc;
+        if (!f) { perror("bad-manifest open"); return 1; }
+        if (fputs(cases[i].json, f) < 0) { fclose(f); return 1; }
+        fclose(f);
+        rc = k3_trunk_open(&tr, sub, c, 0, 1);
+        ck(rc == -1, "bad manifest refused", cases[i].name);
+        /* Close must be safe after a refused open. */
+        k3_trunk_close(&tr);
+    }
+    remove(path);
+    rmdir(sub);
+    return 0;
+}
+
 int main(void)
 {
     /* Construct a minimal K3Cfg matching the fixture dimensions. */
@@ -625,6 +665,9 @@ int main(void)
     } else {
         if (test_truncated(tmpdir, &c) != 0) g_fail++;
     }
+
+    /* §4 corrupt manifests (no fixture needed) */
+    if (test_bad_manifest(tmpdir, &c) != 0) g_fail++;
 
     /* Clean up temp files */
     {
