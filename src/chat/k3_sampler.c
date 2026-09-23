@@ -1,4 +1,4 @@
-/* k3_sampler.c - PCG32 plus deterministic temperature/top-p selection. */
+/* k3_sampler.c - PCG32 plus deterministic temperature/top-p/top-k selection. */
 #include "k3_sampler.h"
 
 #include <math.h>
@@ -29,12 +29,12 @@ static double unit(K3Sampler *s)
     return (double)x * (1.0 / 9007199254740992.0);
 }
 
-void k3_sampler_init(K3Sampler *s, double temperature, double top_p,
+void k3_sampler_init(K3Sampler *s, double temperature, double top_p, int top_k,
                      uint64_t seed, uint64_t turn)
 {
     uint64_t x = seed ^ (turn * UINT64_C(0x9e3779b97f4a7c15));
     uint64_t state = splitmix64(&x), seq = splitmix64(&x);
-    s->temperature = temperature; s->top_p = top_p;
+    s->temperature = temperature; s->top_p = top_p; s->top_k = top_k;
     s->state = 0; s->inc = (seq << 1u) | 1u;
     (void)pcg32(s); s->state += state; (void)pcg32(s);
     s->ids = NULL; s->prob = NULL; s->cap = 0;
@@ -78,8 +78,14 @@ int k3_sampler_next(K3Sampler *s, const float *logits, int n, int greedy, int *o
     if (!(sum > 0.0) || !isfinite(sum)) { *out = best; return 0; }
     for (int i = 0; i < n; i++) s->prob[i] /= sum;
     sort_prob = s->prob; qsort(s->ids, (size_t)n, sizeof(*s->ids), cmp_desc_global); sort_prob = NULL;
+    /* Top-k first: only the K most probable ids stay eligible for the nucleus
+     * below. Disabled (<= 0) or wider than the vocabulary means the whole
+     * sorted list, exactly as before. A top-p nucleus is always a prefix of
+     * the same order, so the two truncations commute by construction. */
+    int nw = n;
+    if (s->top_k > 0 && s->top_k < nw) nw = s->top_k;
     double keep = 0.0; int nk = 0;
-    while (nk < n && keep < s->top_p) keep += s->prob[s->ids[nk++]];
+    while (nk < nw && keep < s->top_p) keep += s->prob[s->ids[nk++]];
     if (!nk) nk = 1;
     double r = unit(s) * keep, acc = 0.0;
     for (int i = 0; i < nk; i++) { int id = s->ids[i]; acc += s->prob[id]; if (r < acc || i + 1 == nk) { *out = id; return 0; } }

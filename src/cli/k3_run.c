@@ -46,6 +46,7 @@
 
 #include <math.h>
 #include <errno.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -401,7 +402,8 @@ static void usage(FILE *f)
 "  --history PATH        portable JSONL transcript; rebuilt on restart\n"
 "  --temperature X       turn chat sampling on, at this temperature (default: greedy)\n"
 "  --top-p P             nucleus probability for chat sampling (default 0.95)\n"
-"  --seed N              chat sampling seed; any of these three turns sampling on\n"
+"  --top-k K             only the K most probable tokens stay eligible (default: off)\n"
+"  --seed N              chat sampling seed; any of these four turns sampling on\n"
 "  --greedy              force argmax even when a sampling flag was given\n"
 "  --no-think            answer in the response channel directly: no think channel and\n"
 "                        no thinking-effort message (the encoder's thinking=False)\n"
@@ -748,7 +750,7 @@ static int chat_resize(int want, int *tmax, int nl, int maxb, size_t kper,
 static int chat_run(Tok *tok, const K3ChatTemplate *tmpl, K3ChatHistory *history,
                     const K3ChatOptions *opts, const char *history_path, int **prompt_ref, int np, int gen,
                     int incremental, int greedy, double temperature, double top_p,
-                    uint64_t seed, Weights *w, const K3Cfg *c, K3Cache *cache,
+                    int top_k, uint64_t seed, Weights *w, const K3Cfg *c, K3Cache *cache,
                     int nl, int *tmax, float **h, float **br, float *ks,
                     float **sc, float *lg, int **seq, int *outtok, int maxb, size_t kper)
 {
@@ -782,7 +784,7 @@ static int chat_run(Tok *tok, const K3ChatTemplate *tmpl, K3ChatHistory *history
         }
         w->cached = 0;
         int T = np, nraw = 0, frc = 0;
-        K3Sampler sampler; k3_sampler_init(&sampler, temperature, top_p, seed, (uint64_t)(turn + 1));
+        K3Sampler sampler; k3_sampler_init(&sampler, temperature, top_p, top_k, seed, (uint64_t)(turn + 1));
         const double t_turn0 = now_s();
         while (nraw < gen) {
             if (incremental) {
@@ -911,6 +913,7 @@ int main(int argc, char **argv)
     K3ChatOptions chat_opts = k3_chat_options_default();
     int no_think = 0, effort_set = 0;
     int temperature_set = 0, top_p_set = 0, seed_set = 0, out_set = 0;
+    int top_k = 0, top_k_set = 0;
     double temperature = 1.0, top_p = 0.95;
     uint64_t seed = 0;
     for (int i = 2; i < argc; i++) {
@@ -970,6 +973,19 @@ int main(int argc, char **argv)
             errno = 0; seed = strtoull(value, &end, 10);
             if (value[0] == '-' || errno || !end || *end) { fprintf(stderr, "--seed needs an unsigned integer\n"); return 2; }
             seed_set = 1;
+        }
+        else if (!strcmp(argv[i], "--top-k") && i + 1 < argc) {
+            /* A full integer of 1 or more. 0 would mean disabled, which is
+             * already the default, so an explicit 0 is a typo; anything past
+             * the vocabulary simply stays eligible, like disabled. */
+            char *end = NULL;
+            errno = 0;
+            const long v = strtol(argv[++i], &end, 10);
+            if (errno == ERANGE || end == argv[i] || *end != '\0' || v < 1 || v > INT_MAX) {
+                fprintf(stderr, "--top-k %s: expected an integer of 1 or more\n", argv[i]);
+                return 2;
+            }
+            top_k = (int)v; top_k_set = 1;
         }
         else if (!strcmp(argv[i], "--greedy")) greedy = 1;
         else if (!strcmp(argv[i], "--no-think")) { chat_opts.thinking = 0; no_think = 1; }
@@ -1072,8 +1088,8 @@ int main(int argc, char **argv)
             fprintf(stderr, "--chat needs --gen greater than zero to complete an assistant turn\n");
             return 2;
         }
-    } else if (system_text || history_path || temperature_set || top_p_set || seed_set || greedy) {
-        fprintf(stderr, "--system, --history, --temperature, --top-p, --seed, and --greedy require --chat\n");
+    } else if (system_text || history_path || temperature_set || top_p_set || top_k_set || seed_set || greedy) {
+        fprintf(stderr, "--system, --history, --temperature, --top-p, --top-k, --seed, and --greedy require --chat\n");
         return 2;
     }
     /* Greedy unless a sampling flag was given. Greedy decoding is what makes output
@@ -1082,7 +1098,7 @@ int main(int argc, char **argv)
      * silently sampled would be the one path in the engine whose output could not
      * be reproduced. --greedy stays as an explicit override for scripts that set a
      * temperature and then want it ignored. */
-    if (!(temperature_set || top_p_set || seed_set)) greedy = 1;
+    if (!(temperature_set || top_p_set || top_k_set || seed_set)) greedy = 1;
     if (chat && !seed_set) {
         /* A supplied seed is reproducible across restarts.  Without one, start a fresh
          * stochastic session; the generated value is printed in the banner. */
@@ -1255,8 +1271,12 @@ int main(int argc, char **argv)
                greedy ? "greedy" : "temperature/top-p sampling",
                chat_opts.thinking ? "thinking_effort=" : "thinking off",
                chat_opts.thinking ? chat_opts.thinking_effort : "");
-        if (!greedy) printf("  sampler  : PCG32 seed %llu, temperature %.3f, top-p %.3f\n",
-                            (unsigned long long)seed, temperature, top_p);
+        if (!greedy) {
+            if (top_k_set) printf("  sampler  : PCG32 seed %llu, temperature %.3f, top-p %.3f, top-k %d\n",
+                                  (unsigned long long)seed, temperature, top_p, top_k);
+            else printf("  sampler  : PCG32 seed %llu, temperature %.3f, top-p %.3f\n",
+                        (unsigned long long)seed, temperature, top_p);
+        }
     } else {
         /* Heap, not stack. This was `int prompt[4096]` and it was the reason the engine
          * refused prompts longer than 4096 ids -- a stack-array size, not a model or
@@ -1636,7 +1656,7 @@ int main(int argc, char **argv)
     if (chat) {
         const int rc = chat_run(&tok, &chat_template, &chat_history, &chat_opts, history_path,
                                 &prompt, np, gen, incremental, greedy, temperature,
-                                top_p, seed, &w, &c, &cache, NL, &Tmax, &h, &br, ks,
+                                top_p, top_k, seed, &w, &c, &cache, NL, &Tmax, &h, &br, ks,
                                 &sc, lg, &seq, outtok, maxb, kper);
         free(w.kvc); free(w.ropec); free(w.mla_slot);
         if (w.trunk) k3_trunk_close(w.trunk);
