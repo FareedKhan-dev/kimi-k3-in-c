@@ -156,7 +156,7 @@ CHAT_SRC   := src/chat/k3_chat.c src/chat/k3_sampler.c
 CLI_BIN    := $(BIN)/k3
 
 # Tests that need no checkpoint. These run in CI on every push.
-UNIT_TESTS := test_ops test_cache test_st test_model_stream test_cfg test_tok test_chat scale_test k3_model test_trunk test_st_faults
+UNIT_TESTS := test_ops test_cache test_st test_model_stream test_cfg test_tok test_chat scale_test k3_model test_trunk test_st_faults test_json
 # Tests that need real shards. Built and run by `make test-all` with SHARD_DIR set;
 # see the weights-test target below.
 WEIGHT_TESTS := test_expert test_real_layer
@@ -213,6 +213,9 @@ $(BIN)/test_tok: tests/unit/test_tok.c | $(BIN)
 $(BIN)/test_chat: tests/unit/test_chat.c src/chat/k3_chat.c src/chat/k3_sampler.c | $(BIN)
 	$(CC) $(CFLAGS) -Wno-unused-function $(INCLUDES) $^ -o $@ $(LDFLAGS)
 
+$(BIN)/test_json: tests/unit/test_json.c | $(BIN)
+	$(CC) -O2 -std=c99 $(WARN) -Wno-unused-function $(INCLUDES) $< -o $@ -lm
+
 $(BIN)/test_cfg: tests/unit/test_cfg.c src/core/k3_ops.c | $(BIN)
 	$(CC) -O2 -std=c99 $(WARN) -Wno-unused-function $(INCLUDES) $^ -o $@ -lm
 
@@ -259,6 +262,7 @@ test: $(CLI_BIN) $(TEST_BINS)
 	    plain.f32.2d plain.bf16.1d tricky.f16.1d packed.u8.2d scalar.f32 second.shard.f32
 	@echo "== model streaming ==";   ./$(BIN)/test_model_stream $(FIXTURES)/st
 	@echo "== shard faults ==";     ./$(BIN)/test_st_faults $(FIXTURES)/st $(BUILD)/stfault
+	@echo "== json refusals ==";    ./$(BIN)/test_json
 	@echo "== config reader ==";     ./$(BIN)/test_cfg fixture $(FIXTURES)/ref_k3.json
 	@echo "== config refusals =="; \
 	  for f in no_layermap bad_layer_index bad_topk; do \
