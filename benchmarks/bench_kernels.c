@@ -78,7 +78,22 @@ int main(void)
         float *x = (float *)malloc((size_t)in * sizeof(float));
         float *y = (float *)malloc((size_t)out * sizeof(float));
         if (!W || !x || !y) { printf("alloc failed\n"); return 1; }
-        fillb((unsigned char *)W, (size_t)in * out * 2, 12345u);
+        /* Finite weights only. Random bytes land on bf16's all-ones exponent
+         * about 1 time in 256, so with in=7168 terms per row essentially every
+         * output is NaN and the hash below compares NaN payloads instead of
+         * arithmetic. Truncate finite floats so the bit-identity check can
+         * actually pass, the way the MXFP4 section already does. */
+        {
+            float *tmp = (float *)malloc((size_t)in * out * sizeof(float));
+            if (!tmp) { printf("alloc failed\n"); return 1; }
+            fillf(tmp, (size_t)in * out, 12345u);
+            for (size_t i = 0; i < (size_t)in * out; i++) {
+                uint32_t u;
+                memcpy(&u, &tmp[i], 4);
+                W[i] = (uint16_t)(u >> 16);
+            }
+            free(tmp);
+        }
         fillf(x, in, 999u);
 
         k3_matmul_bf16(y, x, W, in, out);              /* warm */
