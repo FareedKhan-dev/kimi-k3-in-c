@@ -193,6 +193,18 @@ add_test(NAME ultra_cli_contract
          COMMAND ${CMAKE_COMMAND} -DCLI=$<TARGET_FILE:k3_cli>
                  -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/test_ultra_cli.cmake)
 
+# Contract for tools/layers_to_shards.py, the mapper behind download-model.sh
+# --layers. Same expectations as the "partial download contract" block in `make
+# test`. find_program rather than find_package: python3 drives only this test,
+# and a missing interpreter must fail this test, never the configure step.
+find_program(K3_PYTHON python3)
+if(K3_PYTHON)
+  add_test(NAME partial_shards
+           COMMAND ${CMAKE_COMMAND} -DPYTHON=${K3_PYTHON}
+                   -DFIXTURES=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures
+                   -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/test_partial_shards.cmake)
+endif()
+
 # The tokenizer test needs the released vocabulary, which is not in this repository.
 # Registered UNCONDITIONALLY so ctest reports it as Skipped rather than omitting it:
 # wrapping this in if(DEFINED ENV{K3_TOK_FILES}) did the opposite of what that sentence

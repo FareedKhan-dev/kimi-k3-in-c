@@ -123,6 +123,9 @@ trunk is fully resident and the floor is ~115 GB. Pack it once with
 
 **`--layers N`** binds only the first N layers. Useful for testing the machinery on a
 partial download; the output is not the full model and the engine says so.
+`scripts/download-model.sh <dest> --layers N` fetches exactly that prefix (shards
+resolved from the Hub's tensor index, sizes verified), so a 1 TB disk can still
+exercise the pipeline.
 
 ## Storage matters more than you expect
 

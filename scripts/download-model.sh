@@ -1,11 +1,18 @@
 #!/usr/bin/env bash
 # download-model.sh, fetch the Kimi K3 checkpoint and verify it byte-exactly.
 #
-#   scripts/download-model.sh <dest_dir>
+#   scripts/download-model.sh <dest_dir> [--layers N]
 #
 # The checkpoint is 1.56 TB across 96 safetensors shards. A partial or corrupt download
 # does not fail loudly, it produces wrong tokens, so the byte total is checked against
 # the published figure before anything else is allowed to use it.
+#
+# With --layers N, only the shards holding layers 0..N-1 (plus the embedding table and
+# the output head, which every run needs) are fetched, as resolved from the Hub's own
+# tensor-to-shard index rather than guessed from filenames. The result runs ONLY with
+# `k3 ... --layers M` for M <= N; it is a test instrument for exercising the pipeline,
+# measuring per-layer cost and checking the I/O path, not the model. The engine prints
+# that plainly on every such run, and so does this script.
 #
 # The repository is public, so no token is needed. If you have one, the hf CLI picks it
 # up from $HF_TOKEN or ~/.cache/huggingface/token on its own; this script never reads,
@@ -21,7 +28,26 @@ case "$(uname -s)" in
 esac
 filesize() { stat $STAT_FMT "$1"; }
 
-DEST="${1:?usage: download-model.sh <dest_dir>}"
+DEST="${1:?usage: download-model.sh <dest_dir> [--layers N]}"
+LAYERS=""
+if [ "${2:-}" != "" ]; then
+    [ "${2:-}" = "--layers" ] || {
+        echo "usage: download-model.sh <dest_dir> [--layers N]" >&2
+        exit 1
+    }
+    LAYERS="${3:?usage: download-model.sh <dest_dir> [--layers N]}"
+    [ "${4:-}" = "" ] || {
+        echo "usage: download-model.sh <dest_dir> [--layers N]" >&2
+        exit 1
+    }
+    # atoi-style parsing turned "1junk" into 1 in the CLI once; refuse that shape
+    # here rather than downloading a prefix nobody asked for.
+    case "$LAYERS" in
+        ''|*[!0-9]*|0*)
+            echo "download-model.sh: --layers must be a positive integer, got '$LAYERS'." >&2
+            exit 1 ;;
+    esac
+fi
 REPO="moonshotai/Kimi-K3"
 
 # Published totals for the released checkpoint. Verified, not assumed.
@@ -93,6 +119,98 @@ case "$REVISION" in
 esac
 
 mkdir -p "$DEST"
+
+# Partial mode: fetch only the shards a --layers N run binds. The shard set comes
+# from tools/layers_to_shards.py over the Hub's own tensor index, never from a
+# filename guess, and the per-shard sizes below are checked against the same
+# published figures as the full download. The full byte total and the Hub checksum
+# verification are defined over all 96 shards, so they cannot pass here and are
+# skipped loudly rather than weakened into something that looks like proof.
+if [ -n "$LAYERS" ]; then
+    MAPPER="$(dirname "$0")/../tools/layers_to_shards.py"
+    SIZES="$(dirname "$0")/shard_sizes.txt"
+    [ -f "$SIZES" ] || {
+        echo "FAIL: $SIZES is missing; the subset cannot be sized or verified." >&2
+        exit 1
+    }
+    echo "resolving layer prefix --layers $LAYERS to shards…"
+    echo "  (fetching the 59 MB tensor index first; the shards follow)"
+    HF_XET_HIGH_PERFORMANCE="${HF_XET_HIGH_PERFORMANCE:-1}" \
+    hf download "$REPO" --revision "$REVISION" --local-dir "$DEST" --max-workers 16 \
+        --include "model.safetensors.index.json" \
+        --include "config.json" \
+        --include "tokenizer_config.json" \
+        --include "tiktoken.model"
+    [ -f "$DEST/config.json" ] || {
+        echo "FAIL: config.json did not download; without it the engine refuses to start." >&2
+        exit 1
+    }
+    [ -f "$DEST/tiktoken.model" ] || {
+        echo "WARNING: tiktoken.model did not download; --ids runs work without it," >&2
+        echo "  but --prompt/--prompt-file need --tok pointing at a tokenizer." >&2
+    }
+    SHARD_LIST="$DEST/.k3_partial_shards.txt"
+    python3 "$MAPPER" "$DEST/model.safetensors.index.json" --layers "$LAYERS" >"$SHARD_LIST" || {
+        echo "FAIL: could not resolve --layers $LAYERS to shards; nothing fetched." >&2
+        exit 1
+    }
+    # Size the subset BEFORE moving gigabytes: a --layers prefix still pulls whole
+    # expert pools per layer (each MoE layer holds 896 routed experts), so N=8 is
+    # ~125 GB, not megabytes. Failing here reports a number instead of filling the disk.
+    NEED=0
+    while read -r name; do
+        [ -n "$name" ] || continue
+        want=$(awk -v n="$name" '$1 == n {print $2}' "$SIZES")
+        [ -n "$want" ] || {
+            echo "FAIL: $name is not in the published shard sizes; refusing to guess." >&2
+            exit 1
+        }
+        NEED=$((NEED + want))
+    done <"$SHARD_LIST"
+    NSHARD=$(wc -l <"$SHARD_LIST" | tr -d ' ')
+    AVAIL=$(df -P -k "$DEST" | awk 'NR==2 {print $4 * 1024}')
+    if [ "$AVAIL" -lt "$NEED" ]; then
+        printf 'FAIL: %s has %s bytes free, --layers %s needs %s across %s shard(s).\n' \
+            "$DEST" "$AVAIL" "$LAYERS" "$NEED" "$NSHARD" >&2
+        exit 1
+    fi
+    echo "downloading $NSHARD shard(s), $NEED bytes, for --layers $LAYERS"
+    INC=()
+    while read -r name; do
+        [ -n "$name" ] || continue
+        INC+=(--include "$name")
+    done <"$SHARD_LIST"
+    # Every element is an exact shard filename from the index (no spaces, no
+    # globs), so the quoted expansion passes one --include per shard.
+    HF_XET_HIGH_PERFORMANCE="${HF_XET_HIGH_PERFORMANCE:-1}" \
+    hf download "$REPO" --revision "$REVISION" --local-dir "$DEST" --max-workers 16 \
+        "${INC[@]}"
+    echo
+    echo "verifying…"
+    bad=0
+    while read -r name; do
+        [ -n "$name" ] || continue
+        want=$(awk -v n="$name" '$1 == n {print $2}' "$SIZES")
+        got=$(filesize "$DEST/$name" 2>/dev/null || echo 0)
+        if [ "$got" != "$want" ]; then
+            printf '  BAD  %s: %s bytes, expected %s\n' "$name" "$got" "$want"
+            bad=$((bad + 1))
+        fi
+    done <"$SHARD_LIST"
+    if [ "$bad" -ne 0 ]; then
+        echo "FAIL: $bad shard(s) do not match their published sizes."
+        echo "      Delete just those files and re-run; the download resumes."
+        exit 1
+    fi
+    printf '  shards : all %s match their published sizes individually\n' "$NSHARD"
+    echo
+    echo "PARTIAL CHECKPOINT: layers 0..$((LAYERS - 1)) plus embed/head, $NSHARD of $EXPECT_SHARDS shards."
+    echo "  This is NOT the full model. Run only as:"
+    echo "      ./bin/k3 $DEST --layers $LAYERS --ids ...   (or any M <= $LAYERS)"
+    echo "  The engine prints the same warning on every such run. Full runs need the"
+    echo "  whole 1.56 TB: re-run without --layers."
+    exit 0
+fi
 
 # Free-space preflight. Without this the transfer runs until the filesystem fills, which
 # takes the machine's logging and package manager with it, and the byte-total check below

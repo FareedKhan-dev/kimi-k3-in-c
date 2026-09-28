@@ -1,0 +1,6 @@
+{
+  "metadata": {
+    "total_size": 0,
+    "note": "An index with no weight_map at all. The mapper must refuse it, never guess."
+  }
+}

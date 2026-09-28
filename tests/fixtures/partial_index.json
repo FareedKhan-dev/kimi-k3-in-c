@@ -1,0 +1,16 @@
+{
+  "metadata": {
+    "total_size": 42,
+    "note": "Miniature stand-in for the Hub's model.safetensors.index.json, shaped so a plausible wrong mapper fails. Layer 0 is split across shards 1 AND 2 (a first-shard-per-layer lookup misses half of it), layer 1 lives wholly in shard 3 (a first-K-shards guess is wrong in both directions), and shard 4 holds only a far-future layer (an implementation that returns every shard passes nothing)."
+  },
+  "weight_map": {
+    "language_model.model.embed_tokens.weight": "model-00001-of-00004.safetensors",
+    "language_model.lm_head.weight": "model-00001-of-00004.safetensors",
+    "language_model.model.layers.0.input_layernorm.weight": "model-00001-of-00004.safetensors",
+    "language_model.model.layers.0.mlp.weight": "model-00002-of-00004.safetensors",
+    "language_model.model.layers.1.input_layernorm.weight": "model-00003-of-00004.safetensors",
+    "language_model.model.layers.1.mlp.weight": "model-00003-of-00004.safetensors",
+    "language_model.model.layers.2.input_layernorm.weight": "model-00003-of-00004.safetensors",
+    "language_model.model.layers.7.mlp.weight": "model-00004-of-00004.safetensors"
+  }
+}

@@ -253,6 +253,26 @@ test: $(CLI_BIN) $(TEST_BINS)
 	             echo "  pass on the loader's error and prove nothing"; exit 1;; \
 	      esac; \
 	  done; echo "  3 malformed stop lists refused, each for the right reason"
+	@echo "== partial download contract =="; \
+	  out=$$($(PYTHON) tools/layers_to_shards.py $(FIXTURES)/partial_index.json --layers 1); \
+	  exp=$$(printf 'model-00001-of-00004.safetensors\nmodel-00002-of-00004.safetensors'); \
+	  test "$$out" = "$$exp" || { echo "  --layers 1 mapped to:"; echo "      $$out"; exit 1; }; \
+	  out=$$($(PYTHON) tools/layers_to_shards.py $(FIXTURES)/partial_index.json --layers 2); \
+	  case "$$out" in *"model-00003-of-00004.safetensors"*) ;; \
+	      *) echo "  --layers 2 missed the shard holding half of layer 1:"; \
+	         echo "      $$out"; exit 1;; \
+	  esac; \
+	  case "$$out" in *"model-00004-of-00004.safetensors"*) \
+	      echo "  --layers 2 pulled the shard holding only a far-future layer:"; \
+	      echo "      $$out"; exit 1;; \
+	  esac; \
+	  for bad in "--layers 0" "--layers 9" "--layers abc" "--layers 1junk"; do \
+	      $(PYTHON) tools/layers_to_shards.py $(FIXTURES)/partial_index.json $$bad >/dev/null 2>&1; \
+	      rc=$$?; test $$rc -eq 2 || { echo "  '$$bad' returned $$rc, expected 2"; exit 1; }; \
+	  done; \
+	  $(PYTHON) tools/layers_to_shards.py $(FIXTURES)/partial_index_nomap.json --layers 1 >/dev/null 2>&1; \
+	  rc=$$?; test $$rc -eq 2 || { echo "  index without a weight_map returned $$rc, expected 2"; exit 1; }; \
+	  echo "  2 prefix maps exact, 5 malformed inputs refused with exit 2"
 	@echo "== op kernels ==";        ./$(BIN)/test_ops $(FIXTURES)/ops
 	@echo "== streaming cache ==";   ./$(BIN)/test_cache $(FIXTURES)/cache
 	@echo "== safetensors ==";       ./$(BIN)/test_st $(FIXTURES)/st $(BUILD)/st_index.json \
