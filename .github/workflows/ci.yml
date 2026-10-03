@@ -175,7 +175,7 @@ jobs:
         run: |
           make CC=clang CFLAGS="-O1 -g -std=gnu99 -Wall -Wextra -fsanitize=address,undefined -fno-omit-frame-pointer" \
                LDFLAGS="-lm -fsanitize=address,undefined -lpsapi -lwinpthread" ARCH= \
-               bin/test_ops bin/test_cfg bin/test_cache bin/test_st bin/test_st_faults bin/test_sampler bin/test_json bin/k3_model bin/test_prefix
+               bin/test_ops bin/test_cfg bin/test_cache bin/test_st bin/test_st_faults bin/test_sampler bin/test_json bin/k3_model bin/test_prefix bin/test_mem
           cp /clang64/bin/libclang_rt.asan_dynamic-x86_64.dll /clang64/bin/libwinpthread-1.dll /clang64/bin/libc++.dll bin/
       - name: Run under sanitizers
         env:
@@ -195,6 +195,7 @@ jobs:
           ./bin/test_sampler.exe
           ./bin/k3_model.exe tests/fixtures
           ./bin/test_prefix.exe
+          ./bin/test_mem.exe /tmp/memprobe
 
   # CMakeLists.txt documents itself as staying interchangeable with the Make build, but
   # nothing in CI ever actually built or ran tests through CMake before this job -- that
@@ -252,7 +253,7 @@ jobs:
                bin/test_ops bin/test_cfg bin/test_cache bin/test_st bin/test_st_faults bin/test_sampler bin/test_json \
                bin/test_model_stream bin/k3_model \
                bin/test_ops bin/test_cfg bin/test_cache bin/test_st bin/test_st_faults \
-               bin/test_model_stream bin/k3_model bin/test_prefix \
+               bin/test_model_stream bin/k3_model bin/test_prefix bin/test_mem \
                bin/bench_kernels \
                -j"$(nproc)"
       - name: Run under sanitizers
@@ -277,6 +278,7 @@ jobs:
           ./bin/test_model_stream tests/fixtures/st
           ./bin/k3_model tests/fixtures
           ./bin/test_prefix
+          ./bin/test_mem "$RUNNER_TEMP/memprobe"
           # The ms and GFLOP/s it prints are meaningless under -O1 with ASan interceptors
           # on every load. It is run for what ASan sees, not for what it reports.
           ./bin/bench_kernels
