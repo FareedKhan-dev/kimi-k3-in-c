@@ -145,6 +145,44 @@ int64_t k3_expert_load_direct(const K3St *s, const K3ExpertRef *r,
     return k3_st_read_aligned(s, r->shard, r->off, r->nbytes, buf, bufcap, payload_off);
 }
 
+/* memchr first: a clean tensor, the only kind a quantiser writes, is one vectorised scan
+ * and no counting loop. Only a tensor that already failed pays for the exact count. */
+static int64_t count_255(const unsigned char *p, size_t n)
+{
+    const unsigned char *q = (const unsigned char *)memchr(p, 0xFF, n);
+    if (!q) return 0;
+    int64_t c = 0;
+    for (const unsigned char *end = p + n; q < end; q++) c += (*q == 0xFF);
+    return c;
+}
+
+int64_t k3_expert_nan_scales(const K3St *s, const K3ExpertRef *r, const unsigned char *buf,
+                             char *msg, size_t cap)
+{
+    static const char *W[3] = { "w1", "w2", "w3" };
+    int64_t total = 0, first = 0;
+    int fi = -1, nbad = 0;
+    for (int i = 0; i < 3; i++) {
+        const int64_t n = count_255(buf + r->m[i].s_off, (size_t)r->m[i].s_bytes);
+        if (n == 0) continue;
+        if (fi < 0) { fi = i; first = n; }
+        nbad++;
+        total += n;
+    }
+    if (total && msg && cap) {
+        const char *file = (s && s->path && r->shard >= 0 && r->shard < s->nshard)
+                         ? s->path[r->shard] : "?";
+        snprintf(msg, cap,
+                 "k3_load: %s: " EXPERT_FMT ": %lld of %lld E8M0 scale bytes are 255, "
+                 "the NaN code no quantiser writes%s; refusing L%d expert %d",
+                 file, r->layer, r->expert, W[fi], "weight_scale",
+                 (long long)first, (long long)r->m[fi].s_bytes,
+                 nbad > 1 ? " (other matrices of this expert too)" : "",
+                 r->layer, r->expert);
+    }
+    return total;
+}
+
 void k3_expert_dequant(const K3ExpertRef *r, const unsigned char *buf,
                        float *w1, float *w2, float *w3)
 {

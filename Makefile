@@ -202,7 +202,9 @@ $(BIN)/test_model_stream: tests/unit/test_model_stream.c $(BUILD)/src/model/k3_b
                           $(BUILD)/src/io/k3_st.o $(BUILD)/src/core/k3_ops.o | $(BIN)
 	$(CC) $(CFLAGS) $(INCLUDES) $^ -o $@ $(LDFLAGS)
 
-$(BIN)/test_st_faults: tests/unit/test_st_faults.c $(BUILD)/src/io/k3_st.o | $(BIN)
+$(BIN)/test_st_faults: tests/unit/test_st_faults.c $(BUILD)/src/io/k3_st.o \
+                       $(BUILD)/src/io/k3_load.o $(BUILD)/src/cache/k3_cache.o \
+                       $(BUILD)/src/core/k3_ops.o | $(BIN)
 	$(CC) $(CFLAGS) $(INCLUDES) $^ -o $@ $(LDFLAGS)
 
 # The tokenizer and config reader are portable C99 with no OpenMP and no platform calls,

@@ -101,6 +101,20 @@ static int admit(K3Cache *c, int layer, int expert)
     }
     c->bytes_read += (uint64_t)got;
 
+    /* The bytes are in memory for the first time: the one place to refuse an expert
+     * whose scales carry the E8M0 NaN code, before any kernel folds it in as zero. The
+     * slot is released, so get() fails and k3_moe counts an EXPERT DROP, the same path
+     * a missing tensor takes. See k3_expert_nan_scales. */
+    {
+        char why[1024];
+        if (k3_expert_nan_scales(c->st, &r, c->arena + (size_t)slot * c->slot_bytes + pad,
+                                 why, sizeof why)) {
+            fprintf(stderr, "%s\n", why);
+            c->key_of[slot] = K3_SLOT_EMPTY;
+            return -1;
+        }
+    }
+
     c->ref[slot] = r;
     c->pad[slot] = (int32_t)pad;
     c->key_of[slot] = key;
@@ -322,6 +336,19 @@ static int cache_getmany(K3ExpertSrc *self, int layer, const int *ids, int n)
                     layer, w[i].expert, (long long)w[i].got, (long long)w[i].r.nbytes);
             c->key_of[w[i].slot] = K3_SLOT_EMPTY;       /* release the reservation */
             continue;
+        }
+        /* Same check as admit(), same outcome: the slot stays empty, the get() that
+         * follows every prefetch re-reads the expert, refuses it again and the caller
+         * sees the drop. The line is printed on both attempts. */
+        {
+            char why[1024];
+            if (k3_expert_nan_scales(c->st, &w[i].r,
+                                     c->arena + (size_t)w[i].slot * c->slot_bytes + w[i].pad,
+                                     why, sizeof why)) {
+                fprintf(stderr, "%s\n", why);
+                c->key_of[w[i].slot] = K3_SLOT_EMPTY;
+                continue;
+            }
         }
         const int32_t key = layer * c->n_experts + w[i].expert;
         c->ref[w[i].slot] = w[i].r;

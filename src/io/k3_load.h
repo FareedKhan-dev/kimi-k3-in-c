@@ -61,6 +61,29 @@ int64_t k3_expert_load(const K3St *s, const K3ExpertRef *r, unsigned char *buf);
 int64_t k3_expert_load_direct(const K3St *s, const K3ExpertRef *r,
                               unsigned char *buf, int64_t bufcap, int64_t *payload_off);
 
+/* Count the E8M0 scale bytes equal to 255 in an expert's three matrices.
+ *
+ * WHY 255 IS REFUSED RATHER THAN READ
+ *   E8M0 is a bare biased exponent and 255 is its NaN code in the OCP Microscaling (MX)
+ *   spec. A quantiser never writes it: every scale is an exact power of two, so a 255
+ *   byte can only mean a damaged download, a bad mirror or a repack gone wrong. The
+ *   kernels map it to zero so one byte cannot poison a whole row (see k3.h, MXFP4), the
+ *   right thing for a kernel and the wrong thing for a loader to rely on: an
+ *   expert with 255 bytes in its scales runs with whole 32-weight groups missing and
+ *   nothing says so. The scan here is where the bytes first land in memory, so the
+ *   refusal happens once, before the first multiply, and names the file.
+ *
+ *   The scales are 1 byte per 32 weights: 1,032,192 of a real expert's 17,547,264
+ *   bytes, one pass, a memchr for the clean case.
+ *
+ * buf is the expert exactly as k3_expert_load fills it, or the payload inside a
+ * k3_expert_load_direct buffer (buf + *payload_off). Returns the total count over the
+ * three matrices. When it is non-zero and msg is non-NULL, one line naming the shard
+ * file, the first affected weight_scale tensor and its count is written to msg; the
+ * caller prints it and refuses the expert. */
+int64_t k3_expert_nan_scales(const K3St *s, const K3ExpertRef *r, const unsigned char *buf,
+                             char *msg, size_t cap);
+
 /* Dequantise from a buffer filled by k3_expert_load. Each output must hold
  * rows * pcols * 2 floats. Any of the three may be NULL to skip it. */
 void k3_expert_dequant(const K3ExpertRef *r, const unsigned char *buf,
