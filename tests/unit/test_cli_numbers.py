@@ -11,7 +11,7 @@ class NumericArguments(unittest.TestCase):
             "--spec": ["", "4x", "4294967296", "-1"],
             "--trunk-ring": ["", "2x", "4294967296", "-1"],
             "--stop-id": ["", "4294967296", "999999999999999999999"],
-            "--seed": ["", "-1", "123junk", "18446744073709551616"],
+            "--seed": ["", "-1", " -1", "\t-2", "123junk", "18446744073709551616"],
         }
         for flag in ("--cache-gb", "--trunk-gb", "--draft-trunk-gb"):
             cases[flag] = ["", "1junk", "nan", "inf", "-1", "1e300"]

@@ -986,7 +986,8 @@ int main(int argc, char **argv)
             const char *value = argv[++i];
             char *end = NULL;
             errno = 0; seed = strtoull(value, &end, 10);
-            if (value[0] == '-' || errno || end == value || *end) { fprintf(stderr, "--seed needs an unsigned integer\n"); return 2; }
+            if (value[strspn(value, " \t\n\r\v\f")] == '-' ||
+                errno || end == value || *end) { fprintf(stderr, "--seed needs an unsigned integer\n"); return 2; }
             seed_set = 1;
         }
         else if (!strcmp(argv[i], "--top-k") && i + 1 < argc) {
