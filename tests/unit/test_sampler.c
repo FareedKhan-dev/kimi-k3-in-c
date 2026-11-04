@@ -165,6 +165,51 @@ int main(void)
         k3_sampler_free(&bad);
     }
 
+    /* Invalid model output must not quietly become token zero or argmax. */
+    {
+        float invalid[][3] = {
+            {NAN, 1.0f, 2.0f}, {1.0f, NAN, 2.0f},
+            {0.0f, INFINITY, 1.0f}, {-INFINITY, -INFINITY, -INFINITY}
+        };
+        K3Sampler s;
+        k3_sampler_init(&s, 1.0, 1.0, 0, 7, 0);
+        ok(k3_sampler_next(NULL, logits, 4, 0, &a) != 0,
+           "NULL sampler is rejected");
+        int refused = 1;
+        uint64_t state = s.state;
+        for (int row = 0; row < 4; row++) {
+            for (int greedy = 0; greedy < 2; greedy++) {
+                a = -99;
+                if (!k3_sampler_next(&s, invalid[row], 3, greedy, &a) ||
+                    a != -99 || s.state != state) refused = 0;
+            }
+        }
+        ok(refused, "non-finite model logits fail without output or RNG mutation");
+        float masked[] = {-INFINITY, 1.0f, -INFINITY};
+        ok(!k3_sampler_next(&s, masked, 3, 0, &a) && a == 1,
+           "negative infinity remains a valid token mask");
+        k3_sampler_free(&s);
+
+        k3_sampler_init(&s, INFINITY, 1.0, 0, 7, 0);
+        ok(k3_sampler_next(&s, logits, 4, 0, &a) != 0,
+           "infinite sampler temperature is refused");
+        k3_sampler_free(&s);
+
+        /* Dividing each logit by a tiny temperature first overflows even
+         * for tied finite logits. Subtracting before scaling keeps ties. */
+        float tied[] = {3.0f, 3.0f};
+        int seen0 = 0, seen1 = 0;
+        k3_sampler_init(&s, 1e-308, 1.0, 0, 7, 0);
+        for (i = 0; i < 200; i++) {
+            if (!k3_sampler_next(&s, tied, 2, 0, &a)) {
+                if (a == 0) seen0 = 1;
+                if (a == 1) seen1 = 1;
+            }
+        }
+        ok(seen0 && seen1, "tiny finite temperature preserves equally likely ties");
+        k3_sampler_free(&s);
+    }
+
     printf("\n%s\n", fails ? "SAMPLER TESTS FAILED" : "SAMPLER TESTS PASSED");
     return fails ? 1 : 0;
 }
