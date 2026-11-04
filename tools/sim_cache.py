@@ -24,6 +24,8 @@ usage: sim_cache.py expert_trace.bin [--expert-bytes 17547264] [--disk-mbs 1234]
 from __future__ import annotations
 
 import argparse
+import math
+import os
 import sys
 from collections import OrderedDict, Counter
 
@@ -118,11 +120,22 @@ def main():
                     help="measured random-cold read rate, for the time column")
     a = ap.parse_args()
 
-    raw = np.fromfile(a.trace, dtype=np.int32)
-    if raw.size % 2:
-        sys.exit("trace is not an even number of int32")
+    if a.expert_bytes <= 0:
+        ap.error("--expert-bytes must be positive")
+    if not math.isfinite(a.disk_mbs) or a.disk_mbs <= 0:
+        ap.error("--disk-mbs must be finite and positive")
+    try:
+        if os.path.getsize(a.trace) % (2 * np.dtype(np.int32).itemsize):
+            ap.error("trace must contain complete pairs of int32 values")
+        raw = np.fromfile(a.trace, dtype=np.int32)
+    except OSError as error:
+        ap.error(str(error))
+    if raw.size == 0:
+        ap.error("trace must contain at least one request")
     pairs = raw.reshape(-1, 2)
     layers, experts = pairs[:, 0], pairs[:, 1]
+    if np.any(layers < 0) or np.any(experts < 0) or np.any(experts >= (1 << 20)):
+        ap.error("trace layer/expert ids must be non-negative; expert ids must fit 20 bits")
     keys = (layers.astype(np.int64) << 20) | experts.astype(np.int64)
     trace = keys.tolist()
 
@@ -162,7 +175,7 @@ def main():
               % ("%d GB" % gb, cap, 100.0 * h / n, 100.0 * b / n, 100.0 * p / n,
                  gb_tok, sec))
     print("-" * 76)
-    print("SEC/TOK is expert I/O only, at the measured %.0f MB/s random-cold rate.\n"
+    print("SEC/TOK is expert I/O only, at the supplied %.0f MB/s random-cold rate.\n"
           "It excludes compute, which overlaps with it in a real serving loop."
           % a.disk_mbs)
     print("BELADY and PIN+LRU both use future knowledge, so they are ceilings rather\n"
