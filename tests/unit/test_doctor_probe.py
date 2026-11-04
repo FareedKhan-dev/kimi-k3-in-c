@@ -12,8 +12,8 @@ ROOT = Path(__file__).resolve().parents[2]
 @unittest.skipUnless(os.name != "nt" and shutil.which("bash"), "POSIX bash required")
 class DoctorProbe(unittest.TestCase):
     def test_probe_preserves_existing_file_and_cleans_its_own(self):
-        for fail in (False, True):
-            with self.subTest(fail=fail), tempfile.TemporaryDirectory() as tmp:
+        for mode in ("success", "readfail", "reservefail"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 target, commands = root / "model", root / "commands"
                 target.mkdir()
@@ -26,9 +26,11 @@ class DoctorProbe(unittest.TestCase):
                     "dd": "#!/bin/sh\nfor arg in \"$@\"; do\n"
                           "case \"$arg\" in of=*) output=${arg#of=};; esac\ndone\n"
                           "if [ \"$output\" != /dev/null ]; then printf probe > \"$output\"; fi\n"
-                          + ("exit 1\n" if fail else
+                          + ("exit 1\n" if mode == "readfail" else
                              "echo '1 bytes copied, 1 s, 1 MB/s' >&2\nexit 0\n"),
                 }
+                if mode == "reservefail":
+                    scripts["mktemp"] = "#!/bin/sh\nexit 1\n"
                 for name, text in scripts.items():
                     path = commands / name
                     path.write_text(text)

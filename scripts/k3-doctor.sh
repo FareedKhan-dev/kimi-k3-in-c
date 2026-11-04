@@ -108,10 +108,7 @@ if [ -d "$TARGET" ]; then
 
     printf '  %smeasuring sequential read (2 GB, this takes a moment)…%s\n' "$DIM" "$RST"
     # Reserve a private path; a fixed probe name can overwrite caller data.
-    TMPF=$(mktemp "$TARGET/.k3_doctor_probe.XXXXXX") || {
-        warn "could not reserve a private probe file in $TARGET"
-        exit 1
-    }
+    if TMPF=$(mktemp "$TARGET/.k3_doctor_probe.XXXXXX"); then
     trap 'rm -f -- "$TMPF"' EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
@@ -126,6 +123,9 @@ if [ -d "$TARGET" ]; then
         rm -f "$TMPF" 2>/dev/null
     fi
     trap - EXIT INT TERM
+    else
+        warn "could not reserve a private probe file in $TARGET"
+    fi
 else
     warn "no model directory given; pass one as the first argument to check its storage"
 fi
