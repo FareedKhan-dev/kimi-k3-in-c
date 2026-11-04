@@ -21,7 +21,7 @@
  *   Staging matters: a single end-to-end number that disagrees tells you nothing about
  *   which of thirty tensors is wrong.
  *
- * usage: test_real_layer <shard_dir> [layer] [T] [cache_gb]
+ * usage: test_real_layer <shard_dir> [layer] [T] [cache_gb] [dump_path]
  */
 #define _POSIX_C_SOURCE 200809L
 
@@ -82,11 +82,12 @@ static void real_cfg(K3Cfg *c, int *fa, int *nfa)
 
 int main(int argc, char **argv)
 {
-    if (argc < 2) { fprintf(stderr, "usage: test_real_layer <shard_dir> [layer] [T] [cache_gb]\n"); return 2; }
+    if (argc < 2) { fprintf(stderr, "usage: test_real_layer <shard_dir> [layer] [T] [cache_gb] [dump_path]\n"); return 2; }
     const char *dir = argv[1];
     const int L = argc > 2 ? atoi(argv[2]) : 1;
     const int T = argc > 3 ? atoi(argv[3]) : 4;
     const double cache_gb = argc > 4 ? atof(argv[4]) : 2.0;
+    const char *dump_path = argc > 5 ? argv[5] : "real_layer.json";
 
     K3Cfg c; static int fa[32]; int nfa;
     real_cfg(&c, fa, &nfa);
@@ -125,7 +126,8 @@ int main(int argc, char **argv)
     float *x = (float *)malloc((size_t)T * c.hidden * sizeof(float));
     for (int64_t i = 0; i < (int64_t)T * c.hidden; i++) x[i] = rnd_f() * 0.5f;
 
-    FILE *f = fopen("real_layer.json", "w");
+    FILE *f = fopen(dump_path, "w");
+    if (!f) { fprintf(stderr, "cannot open dump %s\n", dump_path); return 1; }
     fprintf(f, "{\"layer\":%d,\"T\":%d,\"hidden\":%d,\"topk\":%d,\"is_mla\":%d",
             L, T, c.hidden, c.topk, k3_is_mla(&c, L));
     dump_f32(f, "x", x, (int64_t)T * c.hidden, 1);
@@ -187,7 +189,8 @@ int main(int argc, char **argv)
         const double t_dense = now_s() - t0;
         dump_f32(f, "dense_out", dout, (int64_t)T * c.hidden, 1);
         fprintf(f, "}\n");
-        fclose(f);
+        int write_failed = ferror(f);
+        if (fclose(f) != 0) write_failed = 1;
         printf("stage B  (skipped: dense layer, no router)\n");
         printf("stage C  dense MLP, inter %d: %.2f s for %d tokens (%.0f ms/token)\n\n",
                DI, t_dense, T, t_dense * 1000 / T);
@@ -197,10 +200,11 @@ int main(int argc, char **argv)
             if (fabs(dout[i]) > dmx) dmx = fabs(dout[i]);
         }
         printf("output finite: %s, max |y| = %.6f\n", dfin ? "YES" : "NO", dmx);
-        printf("wrote real_layer.json for tools/verify_real_layer.py\n");
+        if (write_failed) fprintf(stderr, "cannot finish writing dump %s\n", dump_path);
+        else printf("wrote %s for tools/verify_real_layer.py\n", dump_path);
         free(dgu); free(dsub); free(dout); free(hn); free(att); free(x); free(scr);
         k3_cache_free(&cache); k3_bind_free(&b); k3_st_close(&st);
-        return dfin ? 0 : 1;
+        return dfin && !write_failed ? 0 : 1;
     }
 
     int *idx = (int *)malloc((size_t)c.topk * sizeof(int));
@@ -234,7 +238,8 @@ int main(int argc, char **argv)
     const double t_moe = now_s() - t0;
     dump_f32(f, "moe_out", moe_out, (int64_t)T * c.hidden, 1);
     fprintf(f, "}\n");
-    fclose(f);
+    int write_failed = ferror(f);
+    if (fclose(f) != 0) write_failed = 1;
 
     printf("stage C  MoE (streamed): %.2f s for %d tokens (%.0f ms/token)\n\n",
            t_moe, T, t_moe * 1000 / T);
@@ -256,12 +261,13 @@ int main(int argc, char **argv)
         if (fabs(moe_out[i]) > mx) mx = fabs(moe_out[i]);
     }
     printf("\noutput finite: %s, max |y| = %.6f\n", finite ? "YES" : "NO", mx);
-    printf("wrote real_layer.json for tools/verify_real_layer.py\n");
+    if (write_failed) fprintf(stderr, "cannot finish writing dump %s\n", dump_path);
+    else printf("wrote %s for tools/verify_real_layer.py\n", dump_path);
 
     k3_cache_dump_hist(&cache, "expert_hist.json");
     k3_cache_dump_trace(&cache, "expert_trace.bin");
     k3_cache_free(&cache);
     k3_bind_free(&b);
     k3_st_close(&st);
-    return finite ? 0 : 1;
+    return finite && !write_failed ? 0 : 1;
 }
