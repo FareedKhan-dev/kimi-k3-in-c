@@ -180,6 +180,31 @@ int main(int argc, char **argv)
       ck(bad3 == 0, "mixed batch and serial", b); }
 
     k3_cache_free(&cache);
+
+    /* ---- 5: a shard set with no routed experts at all ----
+     * `download-model.sh --layers 1` fetches layer 0 only, and layer 0 is the dense
+     * layer, so the checkpoint on disk holds not one routed expert. The engine must
+     * still start: a --layers 1 run never asks the cache for anything. Model that here
+     * by declaring every layer dense, so the probe finds no expert, and require an
+     * empty cache that answers a request cleanly rather than a refusal. */
+    {
+        K3Cfg d = c;
+        d.first_dense = d.n_layers;
+        K3Cache empty;
+        const int rc = k3_cache_init(&empty, &st, &d, probe.nbytes * 8);
+        char b[64];
+        snprintf(b, sizeof b, "init returned %d, %d slots",
+                 rc, rc == 0 ? empty.nslot : -1);
+        ck(rc == 0 && empty.nslot == 0, "no-expert shard set: empty cache", b);
+        if (rc == 0) {
+            K3ExpertQ q;
+            const int g = empty.src.get(&empty.src, 0, 0, &q);
+            snprintf(b, sizeof b, "get returned %d", g);
+            ck(g != 0, "no-expert shard set: get() refuses", b);
+            k3_cache_free(&empty);
+        }
+    }
+
     k3_st_close(&st);
     printf("\n%s\n", g_fail ? "CACHE TESTS FAILED" : "CACHE TESTS PASSED");
     return g_fail ? 1 : 0;
