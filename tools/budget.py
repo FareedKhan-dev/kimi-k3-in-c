@@ -169,6 +169,10 @@ def main():
                     expert_parts[key].add(expert.group(3))
                     expert_sizes[key] += nb
 
+    if not total:
+        print("no tensor bytes present; no hardware estimate is available")
+        return 1
+
     print("%-42s %8s  %12s   %s" % ("CLASS", "TENSORS", "BYTES", "SHARE"))
     print("-" * 82)
     for c, b in by_class.most_common():

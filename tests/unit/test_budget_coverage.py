@@ -31,6 +31,16 @@ class BudgetCoverage(unittest.TestCase):
         self.assertEqual(len(rows), 7)
         self.assertTrue(all(int(total) == 24 and float(percent) <= 100 for total, percent in rows))
 
+    def test_zero_byte_subset_has_no_hardware_estimate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            header = {"language_model.model.embed_tokens.weight":
+                      {"dtype": "BF16", "shape": [0], "data_offsets": [0, 0]}}
+            raw = json.dumps(header).encode()
+            (Path(tmp) / "empty.safetensors").write_bytes(struct.pack("<Q", len(raw)) + raw)
+            result = self.run_budget(tmp)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("no tensor bytes", result.stdout)
+
     def test_incomplete_expert_does_not_project_a_full_cache(self):
         with tempfile.TemporaryDirectory() as tmp:
             header = {"language_model.model.layers.0.block_sparse_moe.experts.0.w1.weight_packed":
