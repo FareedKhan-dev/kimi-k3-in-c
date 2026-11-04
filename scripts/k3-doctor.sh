@@ -107,16 +107,32 @@ if [ -d "$TARGET" ]; then
     fi
 
     printf '  %smeasuring sequential read (2 GB, this takes a moment)…%s\n' "$DIM" "$RST"
-    TMPF="$TARGET/.k3_doctor_probe"
-    if dd if=/dev/zero of="$TMPF" bs=1M count=2048 conv=fsync 2>/dev/null; then
-        sync
-        RATE=$(dd if="$TMPF" of=/dev/null bs=4M 2>&1 | awk '/copied/{print $(NF-1)" "$NF}')
-        rm -f "$TMPF"
-        ok "sequential read: ${RATE:-unknown}"
-        printf '  %sthe engine streams ~135 GB per token; storage is usually the ceiling%s\n' "$DIM" "$RST"
+    # Reserve a private path; a fixed probe name can overwrite caller data.
+    if TMPF=$(mktemp "$TARGET/.k3_doctor_probe.XXXXXX"); then
+        trap 'rm -f -- "$TMPF"' EXIT
+        trap 'exit 130' INT
+        trap 'exit 143' TERM
+        if dd if=/dev/zero of="$TMPF" bs=1M count=2048 conv=fsync 2>/dev/null; then
+            sync
+            if READ_OUT=$(dd if="$TMPF" of=/dev/null bs=4M 2>&1); then
+                RATE=$(printf '%s\n' "$READ_OUT" | awk '/copied/{print $(NF-1)" "$NF}')
+                if [ -n "$RATE" ]; then
+                    ok "sequential read: $RATE"
+                    printf '  %sthe engine streams ~135 GB per token; storage is usually the ceiling%s\n' "$DIM" "$RST"
+                else
+                    warn "could not parse the probe read rate"
+                fi
+            else
+                warn "could not read the probe file at $TARGET"
+            fi
+            rm -f "$TMPF"
+        else
+            warn "could not write a probe file to $TARGET"
+            rm -f "$TMPF" 2>/dev/null
+        fi
+        trap - EXIT INT TERM
     else
-        warn "could not write a probe file to $TARGET"
-        rm -f "$TMPF" 2>/dev/null
+        warn "could not reserve a private probe file in $TARGET"
     fi
 else
     warn "no model directory given; pass one as the first argument to check its storage"

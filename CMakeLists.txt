@@ -222,6 +222,8 @@ add_test(NAME ultra_cli_contract
 # and a missing interpreter must fail this test, never the configure step.
 find_program(K3_PYTHON python3)
 if(K3_PYTHON)
+  add_test(NAME doctor_probe_ownership
+           COMMAND ${K3_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tests/unit/test_doctor_probe.py)
   add_test(NAME partial_shards
            COMMAND ${CMAKE_COMMAND} -DPYTHON=${K3_PYTHON}
                    -DFIXTURES=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures
