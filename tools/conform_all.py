@@ -46,8 +46,15 @@ def main():
         print(__doc__)
         return 2
     shards, cdir, py = sys.argv[1], sys.argv[2], sys.argv[3]
-    first = int(sys.argv[4]) if len(sys.argv) > 4 else 0
-    last = int(sys.argv[5]) if len(sys.argv) > 5 else 92
+    try:
+        first = int(sys.argv[4]) if len(sys.argv) > 4 else 0
+        last = int(sys.argv[5]) if len(sys.argv) > 5 else 92
+    except ValueError:
+        print("first and last must be integer layer indices", file=sys.stderr)
+        return 2
+    if not 0 <= first <= last <= 92:
+        print("layer interval must satisfy 0 <= first <= last <= 92", file=sys.stderr)
+        return 2
     T = sys.argv[6] if len(sys.argv) > 6 else "4"
     cache = sys.argv[7] if len(sys.argv) > 7 else "2"
 
