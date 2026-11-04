@@ -22,6 +22,7 @@
 # -lpsapi (below) are load-bearing rather than stylistic on this platform.
 
 # ---------------------------------------------------------------------------- config --
+.DEFAULT_GOAL := all
 CC       ?= cc
 PYTHON   ?= python3
 BUILD    ?= build
@@ -170,6 +171,20 @@ TOK_FILES  ?= $(HOME)/k3model
 # The safetensors test rebuilds an index and writes it to $(BUILD) rather than /tmp, so
 # two concurrent `make test` runs cannot race on one filename and `make clean` removes it.
 
+# Compiler flags are inputs too. Reusing release objects in `make asan`, or
+# native objects in `make portable`, silently produces the wrong build mode.
+BUILD_CONFIG := $(BUILD)/.configuration
+shell_quote = '$(subst ','"'"',$(1))'
+.PHONY: FORCE
+FORCE:
+
+$(BUILD_CONFIG): FORCE
+	@mkdir -p $(dir $@)
+	@printf '%s\n' $(call shell_quote,$(CC)) $(call shell_quote,$(CFLAGS)) \
+	    $(call shell_quote,$(LDFLAGS)) $(call shell_quote,$(INCLUDES)) > $@.tmp
+	@cmp -s $@.tmp $@ || mv -f $@.tmp $@
+	@rm -f $@.tmp
+
 # ---------------------------------------------------------------------------- targets --
 .PHONY: all test test-all bench portable debug asan ubsan format clean install help \
         tok cfg ops cache st oracle weights-test
@@ -188,22 +203,22 @@ $(BIN):
 
 # Each test links only what it needs, so a failure points at one subsystem.
 $(BIN)/test_ops: tests/unit/test_ops.c $(BUILD)/src/core/k3_ops.o | $(BIN)
-	$(CC) $(CFLAGS) $(INCLUDES) $^ -o $@ $(LDFLAGS)
+	$(CC) $(CFLAGS) $(INCLUDES) $(filter %.c %.o,$^) -o $@ $(LDFLAGS)
 
 $(BIN)/test_cache: tests/unit/test_cache.c $(BUILD)/src/cache/k3_cache.o \
                    $(BUILD)/src/io/k3_load.o $(BUILD)/src/io/k3_st.o \
                    $(BUILD)/src/core/k3_ops.o | $(BIN)
-	$(CC) $(CFLAGS) $(INCLUDES) $^ -o $@ $(LDFLAGS)
+	$(CC) $(CFLAGS) $(INCLUDES) $(filter %.c %.o,$^) -o $@ $(LDFLAGS)
 
 $(BIN)/test_st: tests/unit/test_st.c $(BUILD)/src/io/k3_st.o | $(BIN)
-	$(CC) $(CFLAGS) $(INCLUDES) $^ -o $@ $(LDFLAGS)
+	$(CC) $(CFLAGS) $(INCLUDES) $(filter %.c %.o,$^) -o $@ $(LDFLAGS)
 
 $(BIN)/test_model_stream: tests/unit/test_model_stream.c $(BUILD)/src/model/k3_bind.o \
                           $(BUILD)/src/io/k3_st.o $(BUILD)/src/core/k3_ops.o | $(BIN)
-	$(CC) $(CFLAGS) $(INCLUDES) $^ -o $@ $(LDFLAGS)
+	$(CC) $(CFLAGS) $(INCLUDES) $(filter %.c %.o,$^) -o $@ $(LDFLAGS)
 
 $(BIN)/test_st_faults: tests/unit/test_st_faults.c $(BUILD)/src/io/k3_st.o | $(BIN)
-	$(CC) $(CFLAGS) $(INCLUDES) $^ -o $@ $(LDFLAGS)
+	$(CC) $(CFLAGS) $(INCLUDES) $(filter %.c %.o,$^) -o $@ $(LDFLAGS)
 
 # The tokenizer and config reader are portable C99 with no OpenMP and no platform calls,
 # so they build and are verifiable on any machine, including one with no checkpoint.
@@ -211,22 +226,22 @@ $(BIN)/test_tok: tests/unit/test_tok.c | $(BIN)
 	$(CC) -O2 -std=c99 $(WARN) -Wno-unused-function $(INCLUDES) $< -o $@
 
 $(BIN)/test_chat: tests/unit/test_chat.c src/chat/k3_chat.c src/chat/k3_sampler.c | $(BIN)
-	$(CC) $(CFLAGS) -Wno-unused-function $(INCLUDES) $^ -o $@ $(LDFLAGS)
+	$(CC) $(CFLAGS) -Wno-unused-function $(INCLUDES) $(filter %.c %.o,$^) -o $@ $(LDFLAGS)
 $(BIN)/test_sampler: tests/unit/test_sampler.c src/chat/k3_sampler.c | $(BIN)
-	$(CC) $(CFLAGS) -Wno-unused-function $(INCLUDES) $^ -o $@ $(LDFLAGS)
+	$(CC) $(CFLAGS) -Wno-unused-function $(INCLUDES) $(filter %.c %.o,$^) -o $@ $(LDFLAGS)
 
 $(BIN)/test_json: tests/unit/test_json.c | $(BIN)
 	$(CC) -O2 -std=c99 $(WARN) -Wno-unused-function $(INCLUDES) $< -o $@ -lm
 
 $(BIN)/test_cfg: tests/unit/test_cfg.c src/core/k3_ops.c | $(BIN)
-	$(CC) -O2 -std=c99 $(WARN) -Wno-unused-function $(INCLUDES) $^ -o $@ -lm
+	$(CC) -O2 -std=c99 $(WARN) -Wno-unused-function $(INCLUDES) $(filter %.c %.o,$^) -o $@ -lm
 
 # Signal handling only; no OpenMP, no platform calls beyond signal() and write().
 $(BIN)/test_cancel: tests/unit/test_cancel.c src/cli/k3_cancel.h | $(BIN)
 	$(CC) -O2 -std=gnu99 $(WARN) $(INCLUDES) -Isrc/cli $< -o $@
 # The state file format is plain stdio over arrays; no OpenMP, no platform calls.
 $(BIN)/test_state: tests/unit/test_state.c src/cli/k3_state.c | $(BIN)
-	$(CC) -O2 -std=gnu99 $(WARN) $(INCLUDES) -Isrc/cli $^ -o $@ -lm
+	$(CC) -O2 -std=gnu99 $(WARN) $(INCLUDES) -Isrc/cli $(filter %.c %.o,$^) -o $@ -lm
 # The prefix record is a header of pure C99 with no engine dependency; the engine-level
 # equivalence it relies on is GATE 3b of k3_model.
 $(BIN)/test_prefix: tests/unit/test_prefix.c src/chat/k3_prefix.h | $(BIN)
@@ -238,19 +253,33 @@ $(BIN)/test_sysmem: tests/unit/test_sysmem.c src/cli/k3_sysmem.h | $(BIN)
 # Allocates at REAL model widths (a ~1.8 GB KDA layer), so it needs the optimised build
 # rather than the portable C99 one the tokenizer and config tests use.
 $(BIN)/scale_test: tests/unit/scale_test.c $(BUILD)/src/core/k3_ops.o | $(BIN)
-	$(CC) $(CFLAGS) $(INCLUDES) $^ -o $@ $(LDFLAGS)
+	$(CC) $(CFLAGS) $(INCLUDES) $(filter %.c %.o,$^) -o $@ $(LDFLAGS)
 
 $(BIN)/k3_model: tests/unit/k3_model.c $(BUILD)/src/core/k3_ops.o | $(BIN)
-	$(CC) $(CFLAGS) $(INCLUDES) $^ -o $@ $(LDFLAGS)
+	$(CC) $(CFLAGS) $(INCLUDES) $(filter %.c %.o,$^) -o $@ $(LDFLAGS)
 
 $(BIN)/test_trunk: tests/unit/test_trunk.c $(BUILD)/src/io/k3_trunk.o \
                    $(BUILD)/src/io/k3_st.o \
                    $(BUILD)/src/model/k3_bind.o \
                    $(BUILD)/src/core/k3_ops.o | $(BIN)
-	$(CC) $(CFLAGS) $(INCLUDES) $^ -o $@ $(LDFLAGS)
+	$(CC) $(CFLAGS) $(INCLUDES) $(filter %.c %.o,$^) -o $@ $(LDFLAGS)
 
 $(BIN)/bench_kernels: benchmarks/bench_kernels.c $(BUILD)/src/core/k3_ops.o | $(BIN)
-	$(CC) $(CFLAGS) $(INCLUDES) $^ -o $@ $(LDFLAGS)
+	$(CC) $(CFLAGS) $(INCLUDES) $(filter %.c %.o,$^) -o $@ $(LDFLAGS)
+
+# Conservative header dependencies also cover the directly compiled test/CLI
+# sources; a header edit must not leave a successful but stale executable.
+BUILD_HEADERS := $(wildcard include/k3/*.h third_party/*.h src/*/*.h)
+$(ENGINE_OBJ) $(CLI_BIN) $(TEST_BINS) $(WEIGHT_BINS) $(BIN)/bench_kernels: $(BUILD_CONFIG) $(BUILD_HEADERS)
+
+# A flag change may occur within the filesystem timestamp resolution. Force the
+# affected recipes based on content, not just the stamp's modification time.
+BUILD_CONFIG_CHANGED := $(shell printf '%s\n' $(call shell_quote,$(CC)) \
+    $(call shell_quote,$(CFLAGS)) $(call shell_quote,$(LDFLAGS)) \
+    $(call shell_quote,$(INCLUDES)) | cmp -s - $(BUILD_CONFIG) || echo yes)
+ifneq ($(BUILD_CONFIG_CHANGED),)
+$(ENGINE_OBJ) $(CLI_BIN) $(TEST_BINS) $(WEIGHT_BINS) $(BIN)/bench_kernels: FORCE
+endif
 
 ## test: everything that needs no model weights
 test: $(CLI_BIN) $(TEST_BINS)
@@ -282,6 +311,10 @@ test: $(CLI_BIN) $(TEST_BINS)
 	             echo "  asserting only the exit code would pass on the loader's error"; exit 1;; \
 	      esac; \
 	  done; echo "  6 malformed numerics refused, each for the right reason"
+	@echo "== make build modes =="; \
+	  if command -v $(PYTHON) >/dev/null 2>&1; then \
+	      $(PYTHON) tests/unit/test_make_modes.py; \
+	  else echo "  NOT RUN: no $(PYTHON) on PATH"; fi
 	@echo "== partial download contract =="; \
 	  if ! command -v $(PYTHON) >/dev/null 2>&1; then \
 	      echo "  NOT RUN: no $(PYTHON) on PATH. tools/layers_to_shards.py backs"; \
@@ -375,10 +408,10 @@ weights-test: $(WEIGHT_BINS)
 
 $(BIN)/test_expert: tests/unit/test_expert.c $(BUILD)/src/io/k3_load.o \
                     $(BUILD)/src/io/k3_st.o $(BUILD)/src/core/k3_ops.o | $(BIN)
-	$(CC) $(CFLAGS) $(INCLUDES) $^ -o $@ $(LDFLAGS)
+	$(CC) $(CFLAGS) $(INCLUDES) $(filter %.c %.o,$^) -o $@ $(LDFLAGS)
 
 $(BIN)/test_real_layer: tests/unit/test_real_layer.c $(ENGINE_OBJ) | $(BIN)
-	$(CC) $(CFLAGS) $(INCLUDES) $^ -o $@ $(LDFLAGS)
+	$(CC) $(CFLAGS) $(INCLUDES) $(filter %.c %.o,$^) -o $@ $(LDFLAGS)
 
 ## tok: tokenizer parity against the reference implementation
 tok: $(BIN)/test_tok
