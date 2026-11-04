@@ -32,12 +32,18 @@ class ConformanceRange(unittest.TestCase):
     def test_one_layer_interval_still_runs_both_commands(self):
         with tempfile.TemporaryDirectory() as tmp:
             (Path(tmp) / "real_layer.json").write_text('{"is_mla":1}')
-            responses = [SimpleNamespace(returncode=0, stdout="", stderr=""),
-                         SimpleNamespace(returncode=0, stdout=
-                                         "  attention max|diff| 0 rel 0 budget 1 OK", stderr="")]
+            def child(args, **kwargs):
+                if str(args[0]).endswith("test_real_layer"):
+                    target = Path(args[5]) if len(args) > 5 else Path(tmp) / "real_layer.json"
+                    target.write_text(json.dumps({"layer": int(args[2]), "T": int(args[3]), "is_mla": 1},
+                                                 separators=(",", ":")))
+                    return SimpleNamespace(returncode=0, stdout="", stderr="")
+                stages = ("x_norm", "attn_out", "route_wt (id-sorted)", "moe_out")
+                output = "\n".join(f"  {name} max|diff| 0 rel 0 budget 1 OK" for name in stages)
+                return SimpleNamespace(returncode=0, stdout=output, stderr="")
             with patch.object(sys, "argv", ["conform_all.py", "unused", tmp,
                                            "unused-python", "92", "92"]), \
-                 patch.object(conform.subprocess, "run", side_effect=responses) as run, \
+                 patch.object(conform.subprocess, "run", side_effect=child) as run, \
                  redirect_stdout(io.StringIO()):
                 self.assertEqual(conform.main(), 0)
                 self.assertEqual(run.call_count, 2)
