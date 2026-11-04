@@ -87,6 +87,7 @@ typedef struct {
      * whole curve: record (layer, expert) in request order, then simulate any
      * replacement policy at any capacity offline. 1,472 requests per token, 8 bytes
      * each, is 12 KB per token. */
+    int          trace_enabled;  /* library default: on; CLI opts in explicitly */
     int32_t     *trace;
     int64_t      ntrace, captrace;
 } K3Cache;
@@ -96,6 +97,10 @@ typedef struct {
  * without evicting an expert that is still in use. */
 int  k3_cache_init(K3Cache *c, const K3St *st, const K3Cfg *cfg, int64_t budget_bytes);
 void k3_cache_free(K3Cache *c);
+
+/* Disable/enable request tracing independently of the bounded histogram. Disabling
+ * discards the existing trace allocation; enabling records subsequent requests. */
+void k3_cache_set_trace(K3Cache *c, int enabled);
 
 /* Pin or unpin whatever slot currently holds this expert. Pinning a resident hot set
  * is the payoff from the histogram. Returns 0 if the expert was not resident. */

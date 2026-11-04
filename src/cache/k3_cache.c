@@ -363,14 +363,16 @@ static int cache_get(K3ExpertSrc *self, int layer, int expert, K3ExpertQ *out)
     /* Record the request before serving it. The trace must reflect what the MODEL
      * asked for, independent of what the cache happened to hold, or replaying it at a
      * different capacity would be meaningless. */
-    if (c->ntrace + 2 > c->captrace) {
-        int64_t nc = c->captrace ? c->captrace * 2 : (1 << 16);
-        int32_t *nt = (int32_t *)realloc(c->trace, (size_t)nc * sizeof(int32_t));
-        if (nt) { c->trace = nt; c->captrace = nc; }
-    }
-    if (c->ntrace + 2 <= c->captrace) {
-        c->trace[c->ntrace++] = layer;
-        c->trace[c->ntrace++] = expert;
+    if (c->trace_enabled) {
+        if (c->ntrace + 2 > c->captrace) {
+            int64_t nc = c->captrace ? c->captrace * 2 : (1 << 16);
+            int32_t *nt = (int32_t *)realloc(c->trace, (size_t)nc * sizeof(int32_t));
+            if (nt) { c->trace = nt; c->captrace = nc; }
+        }
+        if (c->ntrace + 2 <= c->captrace) {
+            c->trace[c->ntrace++] = layer;
+            c->trace[c->ntrace++] = expert;
+        }
     }
 
     const int slot = admit(c, layer, expert);
@@ -382,6 +384,7 @@ static int cache_get(K3ExpertSrc *self, int layer, int expert, K3ExpertQ *out)
 int k3_cache_init(K3Cache *c, const K3St *st, const K3Cfg *cfg, int64_t budget_bytes)
 {
     memset(c, 0, sizeof *c);
+    c->trace_enabled = 1;  /* preserve the library's existing trace behavior */
     c->src.get = cache_get;
     c->src.resident = cache_resident;
     /* K3_NOPREFETCH=1 disables the batch path at runtime. An A/B between two BUILDS
@@ -477,6 +480,16 @@ void k3_cache_free(K3Cache *c)
     free(c->used_at); free(c->pinned); free(c->ref); free(c->pad); free(c->hist);
     free(c->trace);
     memset(c, 0, sizeof *c);
+}
+
+void k3_cache_set_trace(K3Cache *c, int enabled)
+{
+    c->trace_enabled = enabled != 0;
+    if (!c->trace_enabled) {
+        free(c->trace);
+        c->trace = NULL;
+        c->ntrace = c->captrace = 0;
+    }
 }
 
 int k3_cache_dump_trace(const K3Cache *c, const char *path)
