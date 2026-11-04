@@ -147,4 +147,4 @@ if [ "$DIVERGED" -ne 0 ]; then
     exit 1
 fi
 echo
-echo "Output identical at every split. Machine details: $OUT/machine.txt"
+echo "Output identical across successful runs. Machine details: $OUT/machine.txt"

@@ -155,4 +155,4 @@ if [ -z "$REF" ]; then
     echo "No successful rung; output equivalence was not evaluated."
     exit 1
 fi
-echo "Output identical at every rung. Machine details: $OUT/machine.txt"
+echo "Output identical across successful runs. Machine details: $OUT/machine.txt"

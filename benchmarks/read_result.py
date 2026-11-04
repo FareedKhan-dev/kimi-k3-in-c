@@ -5,7 +5,10 @@ import sys
 
 
 def fields(result, prompt, generated):
-    if result["prompt_ids"] != prompt:
+    actual_prompt = result["prompt_ids"]
+    if not isinstance(actual_prompt, list) or any(type(i) is not int or i < 0 for i in actual_prompt):
+        raise ValueError("prompt ids must be a list of non-negative integers")
+    if actual_prompt != prompt:
         raise ValueError("prompt ids do not match the benchmark request")
     ids = result["generated_ids"]
     if not isinstance(ids, list) or len(ids) != generated or any(type(i) is not int or i < 0 for i in ids):

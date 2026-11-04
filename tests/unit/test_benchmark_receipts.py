@@ -41,6 +41,10 @@ class ReceiptFields(unittest.TestCase):
             with self.subTest(change=change), self.assertRaises((ValueError, TypeError)):
                 reader.fields(value, receipt()["prompt_ids"], 8)
         value = receipt()
+        value["prompt_ids"] = [True]
+        with self.assertRaises(ValueError):
+            reader.fields(value, [1], 8)
+        value = receipt()
         del value["seconds_per_token"]
         with self.assertRaises(KeyError):
             reader.fields(value, value["prompt_ids"], 8)
@@ -89,14 +93,14 @@ class FreshResults(unittest.TestCase):
                     self.assertEqual(result.returncode, 0 if produces is True else 1,
                                      result.stdout + result.stderr)
                     if produces is True:
-                        self.assertIn("Output identical at every", result.stdout)
+                        self.assertIn("Output identical", result.stdout)
                         for tag in tags:
                             value = json.loads((root / "out" / (tag + ".json")).read_text())
                             self.assertEqual(value["seconds_per_token"], 2.5)
                     else:
                         if produces is False:
                             self.assertIn("fresh result", result.stdout)
-                        self.assertNotIn("Output identical at every", result.stdout)
+                        self.assertNotIn("Output identical", result.stdout)
                         for tag in tags:
                             self.assertEqual((root / "out" / (tag + ".json")).read_text(), old)
 
