@@ -46,9 +46,16 @@ def main():
         c = np.array(C["logits_bits"], dtype=np.uint32).view(np.float32)
     else:
         C = {}
+        if os.path.getsize(cbin) % np.dtype(np.float32).itemsize:
+            print("INVALID INPUT: logit dump is not a whole number of float32 values")
+            return 1
         c = np.fromfile(cbin, dtype=np.float32)
     R = json.load(open(refp))
     r = np.array(R["logits_bits"], dtype=np.uint32).view(np.float32)
+
+    if any(v.ndim != 1 or v.size == 0 or not np.isfinite(v).all() for v in (c, r)):
+        print("INVALID INPUT: logits must be nonempty, finite, one-dimensional vectors")
+        return 1
 
     if c.shape != r.shape:
         print("SHAPE MISMATCH: C has %d logits, reference has %d" % (c.size, r.size))
@@ -115,10 +122,8 @@ def main():
               % gap)
     print()
     if ok_tok and ok_num:
-        print("VERIFIED: the C engine's logits match the torch reference over the FULL "
-              "93-layer stack on the real checkpoint, elementwise, and the argmax token "
-              "agrees. Composition, the AttnRes aggregator, the final norm and the "
-              "lm_head are all correct.")
+        print("VERIFIED: the supplied final-position logit vectors agree elementwise "
+              "within the reported tolerance, and their argmax tokens agree.")
         return 0
     if not ok_tok:
         print("TOKEN MISMATCH: C would emit %d, the reference would emit %d" % (ca, ra))
