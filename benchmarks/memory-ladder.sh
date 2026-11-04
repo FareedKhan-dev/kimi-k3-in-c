@@ -18,6 +18,12 @@ REPS="${4:-3}"
 IDS=1008,10484,318,15383,387
 GEN=8
 
+# An empty seq loop must never certify identical output at every rung/split.
+if ! [[ "$REPS" =~ ^0*[1-9][0-9]*$ ]]; then
+    echo "repetitions must be a positive integer" >&2
+    exit 2
+fi
+
 # Preflight. Each of these, left unchecked, yields a COMPLETE and plausible-looking
 # ladder composed entirely of failures, because the runner below cannot otherwise tell
 # "killed for exceeding its memory ceiling" apart from "the command does not exist".
