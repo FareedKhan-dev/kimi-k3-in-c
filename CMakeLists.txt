@@ -152,6 +152,7 @@ k3_add_test(test_tok    tests/unit/test_tok.c)
 k3_add_test(test_chat   tests/unit/test_chat.c)
 k3_add_test(test_st_faults tests/unit/test_st_faults.c)
 k3_add_test(test_json tests/unit/test_json.c)
+k3_add_test(test_output tests/unit/test_output.c)
 k3_add_test(test_cancel tests/unit/test_cancel.c)
 target_include_directories(test_cancel PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/cli)
 k3_add_test(test_state  tests/unit/test_state.c)
@@ -208,6 +209,7 @@ add_test(NAME safetensors COMMAND test_st   ${FIX}/st ${CMAKE_CURRENT_BINARY_DIR
          plain.f32.2d plain.bf16.1d tricky.f16.1d packed.u8.2d scalar.f32 second.shard.f32)
 add_test(NAME shard_faults COMMAND test_st_faults ${FIX}/st ${CMAKE_CURRENT_BINARY_DIR}/stfault)
 add_test(NAME json_refusals COMMAND test_json)
+add_test(NAME output_close COMMAND test_output ${FIX}/ref_k3.json)
 add_test(NAME sampler COMMAND test_sampler)
 add_test(NAME state_file COMMAND test_state ${CMAKE_CURRENT_BINARY_DIR}/state)
 add_test(NAME chat_prefix COMMAND test_prefix)
@@ -222,6 +224,9 @@ add_test(NAME ultra_cli_contract
 # and a missing interpreter must fail this test, never the configure step.
 find_program(K3_PYTHON python3)
 if(K3_PYTHON)
+  add_test(NAME cli_output_failures
+           COMMAND ${CMAKE_COMMAND} -E env "K3_TEST_BIN=$<TARGET_FILE:k3_cli>"
+                   ${K3_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tests/unit/test_cli_output_failures.py)
   add_test(NAME partial_shards
            COMMAND ${CMAKE_COMMAND} -DPYTHON=${K3_PYTHON}
                    -DFIXTURES=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures
