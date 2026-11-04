@@ -28,16 +28,20 @@ class SourceOwnership(unittest.TestCase):
                               capture_output=True, text=True, check=False)
 
     def test_aliases_preserve_input(self):
-        for kind in ("same-directory", "dot-directory", "linked-binary", "linked-manifest"):
+        for kind in ("same-directory", "dot-directory", "linked-binary", "linked-manifest",
+                     "cross-binary", "cross-manifest"):
             with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 src = root / "src"
                 original = self.fixture(src)
                 dst = src if kind == "same-directory" else src / "." if kind == "dot-directory" else root / "out"
-                if kind.startswith("linked"):
+                if kind.startswith(("linked", "cross")):
                     dst.mkdir()
-                    name = "trunk.bin" if kind == "linked-binary" else "trunk.json"
-                    os.link(src / name, dst / name)
+                    name = "trunk.bin" if kind.endswith("binary") else "trunk.json"
+                    target = name
+                    if kind.startswith("cross"):
+                        target = "trunk.json" if name == "trunk.bin" else "trunk.bin"
+                    os.link(src / name, dst / target)
                 result = self.run_tool(src, dst)
                 self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
                 self.assertIn("source", result.stderr)
