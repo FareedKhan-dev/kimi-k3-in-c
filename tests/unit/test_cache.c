@@ -179,6 +179,18 @@ int main(int argc, char **argv)
     { char b[64]; snprintf(b, sizeof b, "%d of %d wrong", bad3, NE);
       ck(bad3 == 0, "mixed batch and serial", b); }
 
+    /* Linux's full device reports buffered write errors only on flush/close. */
+    FILE *full = fopen("/dev/full", "wb");
+    if (full) {
+        fclose(full);
+        ck(k3_cache_dump_hist(&cache, "/dev/full") != 0,
+           "histogram flush failure is reported", "full device");
+        ck(k3_cache_dump_trace(&cache, "/dev/full") != 0,
+           "trace flush failure is reported", "full device");
+    } else {
+        printf("  SKIP  full-device cache output tests (no /dev/full)\n");
+    }
+
     k3_cache_free(&cache);
     k3_st_close(&st);
     printf("\n%s\n", g_fail ? "CACHE TESTS FAILED" : "CACHE TESTS PASSED");

@@ -1,3 +1,4 @@
+#include "k3_output.h"
 /* k3_cache.c - see k3_cache.h. */
 #define _POSIX_C_SOURCE 200809L
 
@@ -485,10 +486,12 @@ int k3_cache_dump_trace(const K3Cache *c, const char *path)
     FILE *f = fopen(path, "wb");
     if (!f) return -1;
     const size_t n = fwrite(c->trace, sizeof(int32_t), (size_t)c->ntrace, f);
-    fclose(f);
+    int failed = n != (size_t)c->ntrace;
+    if (k3_output_close(f) != 0) failed = 1;
+    if (failed) return -1;
     printf("wrote %s: %lld requests (%.1f KB)\n",
            path, (long long)(c->ntrace / 2), (double)c->ntrace * 4 / 1024.0);
-    return n == (size_t)c->ntrace ? 0 : -1;
+    return 0;
 }
 
 int k3_cache_pin(K3Cache *c, int layer, int expert, int pin)
@@ -563,6 +566,5 @@ int k3_cache_dump_hist(const K3Cache *c, const char *path)
         }
     }
     fprintf(f, "}}\n");
-    fclose(f);
-    return 0;
+    return k3_output_close(f);
 }

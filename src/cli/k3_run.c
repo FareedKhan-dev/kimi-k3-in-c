@@ -63,6 +63,7 @@
 #include <omp.h>
 #endif
 
+#include "k3_output.h"
 #include "k3_portable_io.h"   /* getline() shim for MinGW; see the header for why */
 #include "k3.h"
 #include "k3_bind.h"
@@ -1934,11 +1935,17 @@ int main(int argc, char **argv)
         if (logits_path && g == 0) {
             FILE *lf = fopen(logits_path, "wb");
             if (lf) {
-                fwrite(lg, sizeof(float), (size_t)c.vocab, lf);
-                fclose(lf);
-                printf("wrote %s (%d float32 logits)\n", logits_path, c.vocab);
+                size_t written = fwrite(lg, sizeof(float), (size_t)c.vocab, lf);
+                int failed = k3_output_close(lf) != 0;
+                if (written != (size_t)c.vocab || failed) {
+                    fprintf(stderr, "cannot finish writing %s for the logits dump\n", logits_path);
+                    out_fail = 1;
+                } else {
+                    printf("wrote %s (%d float32 logits)\n", logits_path, c.vocab);
+                }
             } else {
                 fprintf(stderr, "cannot open %s for the logits dump\n", logits_path);
+                out_fail = 1;
             }
         }
         const double dt = now_s() - ts;
@@ -2057,15 +2064,25 @@ int main(int argc, char **argv)
                 w.ultra ? "true" : "false", stopped_at, interrupted ? "true" : "false");
         json_string(f, generated_text);
         fputs("}\n", f);
-        fclose(f);
-        printf("\nwrote %s\n", outp);
+        if (k3_output_close(f) != 0) {
+            fprintf(stderr, "cannot finish writing %s\n", outp);
+            out_fail = 1;
+        } else {
+            printf("\nwrote %s\n", outp);
+        }
     }
     if (trace_dir) {
         char p[4096];
-        snprintf(p, sizeof p, "%s/expert_hist.json", trace_dir);
-        k3_cache_dump_hist(&cache, p);
-        snprintf(p, sizeof p, "%s/expert_trace.bin", trace_dir);
-        k3_cache_dump_trace(&cache, p);
+        int n = snprintf(p, sizeof p, "%s/expert_hist.json", trace_dir);
+        if (n < 0 || n >= (int)sizeof p || k3_cache_dump_hist(&cache, p) != 0) {
+            fprintf(stderr, "cannot write expert histogram in %s\n", trace_dir);
+            out_fail = 1;
+        }
+        n = snprintf(p, sizeof p, "%s/expert_trace.bin", trace_dir);
+        if (n < 0 || n >= (int)sizeof p || k3_cache_dump_trace(&cache, p) != 0) {
+            fprintf(stderr, "cannot write expert trace in %s\n", trace_dir);
+            out_fail = 1;
+        }
     }
 
     free(w.kvc); free(w.ropec); free(w.mla_slot);
