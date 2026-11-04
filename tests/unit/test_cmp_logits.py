@@ -9,22 +9,28 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-import numpy as np
+try:
+    import numpy as np
+except ImportError:
+    np = None
 
 spec = importlib.util.spec_from_file_location(
     "cmp_logits", Path(__file__).resolve().parents[2] / "tools" / "cmp_logits.py"
 )
 cmp_logits = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(cmp_logits)
+if np is not None:
+    spec.loader.exec_module(cmp_logits)
 
 
+@unittest.skipIf(np is None, "NumPy is required for the logit comparator")
 class LogitComparison(unittest.TestCase):
-    def compare(self, values, extra=b"", json_input=False):
+    def compare(self, values, extra=b"", json_input=False, reference=None):
         with tempfile.TemporaryDirectory() as tmp:
             vector = np.array(values, dtype=np.float32)
             bits = vector.view(np.uint32).tolist()
             ref = Path(tmp) / "ref.json"
-            ref.write_text(json.dumps({"logits_bits": bits, "prompt_ids": [1]}))
+            ref_bits = bits if reference is None else np.array(reference, dtype=np.float32).view(np.uint32).tolist()
+            ref.write_text(json.dumps({"logits_bits": ref_bits, "prompt_ids": [1]}))
             actual = Path(tmp) / ("actual.json" if json_input else "actual.bin")
             if json_input:
                 actual.write_text(json.dumps({"logits_bits": bits, "prompt_ids": [1]}))
@@ -43,6 +49,13 @@ class LogitComparison(unittest.TestCase):
         self.assertNotIn("93-layer", output)
         self.assertNotIn("real checkpoint", output)
         self.assertIn("supplied", output)
+
+    def test_different_vectors_are_not_verified(self):
+        for reference in [[3, 2, 1], [1, 2], [float("nan"), 2, 3]]:
+            with self.subTest(reference=reference):
+                rc, output = self.compare([1, 2, 3], reference=reference)
+                self.assertEqual(rc, 1)
+                self.assertNotIn("VERIFIED", output)
 
     def test_incomplete_float_is_not_ignored(self):
         rc, output = self.compare([1, 2, 3], extra=b"x")

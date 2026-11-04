@@ -282,6 +282,10 @@ test: $(CLI_BIN) $(TEST_BINS)
 	             echo "  asserting only the exit code would pass on the loader's error"; exit 1;; \
 	      esac; \
 	  done; echo "  6 malformed numerics refused, each for the right reason"
+	@echo "== logit comparator evidence contract =="; \
+	  if command -v $(PYTHON) >/dev/null 2>&1; then \
+	      $(PYTHON) tests/unit/test_cmp_logits.py; \
+	  else echo "  NOT RUN: no $(PYTHON) on PATH"; fi
 	@echo "== partial download contract =="; \
 	  if ! command -v $(PYTHON) >/dev/null 2>&1; then \
 	      echo "  NOT RUN: no $(PYTHON) on PATH. tools/layers_to_shards.py backs"; \
