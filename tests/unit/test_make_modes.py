@@ -36,8 +36,16 @@ class BuildModes(unittest.TestCase):
             common = ["make", f"CC={compiler}", f"SANITIZER_CC={compiler}",
                       f"BUILD={tmp / 'build'}", f"BIN={tmp / 'bin'}",
                       "OMP_CFLAGS=", "OMP_LDFLAGS=", "SANITIZER_DLLS="]
-            env = {k: v for k, v in os.environ.items()
-                   if k not in ("MAKEFLAGS", "MFLAGS", "MAKELEVEL")}
+            # A parent make exports command-line variables such as CI's portable
+            # ARCH. Start the recording experiment from its own default mode while
+            # preserving PATH and the host's tool/interpreter locations.
+            build_inputs = {
+                "MAKEFLAGS", "MFLAGS", "MAKELEVEL", "MAKEOVERRIDES", "GNUMAKEFLAGS",
+                "CC", "CFLAGS", "LDFLAGS", "ARCH", "INCLUDES", "WARN", "BUILD", "BIN",
+                "OMP_PREFIX", "OMP_CFLAGS", "OMP_LDFLAGS", "SANITIZER_CC",
+                "SANITIZER_LDFLAGS", "SANITIZER_DLLS", "UNAME_S", "UNAME_M",
+            }
+            env = {k: v for k, v in os.environ.items() if k not in build_inputs}
 
             def build(*targets, extra=()):
                 log.write_text("")
