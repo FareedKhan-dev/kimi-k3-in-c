@@ -46,6 +46,10 @@ def main():
         print(__doc__)
         return 2
     shards, cdir, py = sys.argv[1], sys.argv[2], sys.argv[3]
+    # Inputs are relative to the caller, not to the child process's cdir.
+    shards, cdir = os.path.abspath(shards), os.path.abspath(cdir)
+    if os.path.dirname(py):
+        py = os.path.abspath(py)
     first = int(sys.argv[4]) if len(sys.argv) > 4 else 0
     last = int(sys.argv[5]) if len(sys.argv) > 5 else 92
     T = sys.argv[6] if len(sys.argv) > 6 else "4"
