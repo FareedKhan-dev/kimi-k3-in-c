@@ -19,15 +19,24 @@ class Repetitions(unittest.TestCase):
                     commands = root / "commands"
                     commands.mkdir()
                     probe = commands / "systemd-run"
-                    probe.write_text("#!/bin/sh\necho PREFLIGHT_RAN >&2\nexit 99\n")
+                    probe.write_text("#!/bin/sh\necho PREFLIGHT_RAN\nexit 0\n")
                     probe.chmod(0o755)
+                    (root / "bin").mkdir()
+                    engine = root / "bin/k3"
+                    engine.write_text("#!/bin/sh\nexit 0\n")
+                    engine.chmod(0o755)
+                    column = commands / "column"
+                    column.write_text("#!/bin/sh\nexit 0\n")
+                    column.chmod(0o755)
+                    (root / "model").mkdir()
+                    (root / "trunk").mkdir()
                     args = ["bash", str(ROOT / "benchmarks" / script),
-                            "unused-model", "unused-trunk", str(root / "out")]
+                            str(root / "model"), str(root / "trunk"), str(root / "out")]
                     if script == "split-sweep.sh":
                         args.append("128")
                     args.append(reps)
                     env = dict(os.environ, PATH=str(commands) + os.pathsep + os.environ["PATH"])
-                    result = subprocess.run(args, env=env, capture_output=True, text=True, check=False)
+                    result = subprocess.run(args, env=env, cwd=root, capture_output=True, text=True, check=False)
                     self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
                     self.assertIn("repetitions", result.stdout + result.stderr)
                     self.assertNotIn("PREFLIGHT_RAN", result.stdout + result.stderr)
