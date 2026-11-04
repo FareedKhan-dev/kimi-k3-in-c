@@ -67,11 +67,13 @@ for f in $FRACS; do
     for r in $(seq 1 "$REPS"); do
         tag="tr${TR}_r${r}"
         echo "== ${TOTAL} GB total: trunk ${TR} / cache ${CA}, rep ${r}/${REPS} =="
+        # A private fresh path cannot reuse a previous campaign's successful JSON.
+        RESULT=$(mktemp "$OUT/$tag.json.XXXXXX") || exit 1
         systemd-run --scope --user -q \
             -p MemoryMax=${TOTAL}G -p MemorySwapMax=0 \
             ./bin/k3 "$MODEL" --ids "$IDS" --gen "$GEN" \
             --trunk "$TRUNK" --trunk-gb "$TR" --cache-gb "$CA" --incremental \
-            --out "$OUT/$tag.json" > "$OUT/$tag.log" 2>&1
+            --out "$RESULT" > "$OUT/$tag.log" 2>&1
         rc=$?
         if [ $rc -ne 0 ]; then
             # Unlike the ladder, an OOM here is a HARNESS defect, not a result: every
@@ -81,14 +83,13 @@ for f in $FRACS; do
             tail -5 "$OUT/$tag.log" | sed 's/^/   | /'
             exit 1
         fi
-        SPT=$(grep -oE '[0-9.]+ s/token average' "$OUT/$tag.log" | tail -1 | awk '{print $1}')
-        RSS=$(grep -oE 'PEAK RSS for the whole run: [0-9.]+' "$OUT/$tag.log" | tail -1 | awk '{print $7}')
-        GBR=$(grep -oE 'read from disk: [0-9.]+ GB' "$OUT/$tag.log" | tail -1 | awk '{print $4}')
-        IDSO=$(python3 -c "import json,sys;print(','.join(map(str,json.load(open(sys.argv[1]))['generated_ids'])))" "$OUT/$tag.json" 2>/dev/null)
-        if [ -z "$IDSO" ]; then
-            echo "   *** could not read generated_ids from $OUT/$tag.json ***"
+        METRICS=$(python3 "$(dirname "$0")/read_result.py" "$RESULT" "$IDS" "$GEN") || {
+            echo "   *** invalid or missing fresh result: $RESULT ***"
             exit 1
-        fi
+        }
+        IFS=$'\t' read -r SPT RSS GBR IDSO <<< "$METRICS"
+        mv -f "$RESULT" "$OUT/$tag.json" || exit 1
+
         if [ -z "$REF" ]; then REF="$IDSO"
         elif [ "$IDSO" != "$REF" ]; then
             echo "   *** OUTPUT DIFFERS across splits, this is a bug ***"
