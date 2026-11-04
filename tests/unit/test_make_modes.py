@@ -40,7 +40,7 @@ class BuildModes(unittest.TestCase):
             # ARCH. Start the recording experiment from its own default mode while
             # preserving PATH and the host's tool/interpreter locations.
             build_inputs = {
-                "MAKEFLAGS", "MFLAGS", "MAKELEVEL", "MAKEOVERRIDES", "GNUMAKEFLAGS",
+                "MAKEFLAGS", "MFLAGS", "MAKELEVEL", "MAKEOVERRIDES", "GNUMAKEFLAGS", "MAKEFILES", "OPT",
                 "CC", "CFLAGS", "LDFLAGS", "ARCH", "INCLUDES", "WARN", "BUILD", "BIN",
                 "OMP_PREFIX", "OMP_CFLAGS", "OMP_LDFLAGS", "SANITIZER_CC",
                 "SANITIZER_LDFLAGS", "SANITIZER_DLLS", "UNAME_S", "UNAME_M",
