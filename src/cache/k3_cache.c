@@ -1,4 +1,3 @@
-#include "k3_output.h"
 /* k3_cache.c - see k3_cache.h. */
 #define _POSIX_C_SOURCE 200809L
 
@@ -14,6 +13,7 @@
 #endif
 
 #include "k3_cache.h"
+#include "k3_output.h"
 
 static double now_s(void)
 {

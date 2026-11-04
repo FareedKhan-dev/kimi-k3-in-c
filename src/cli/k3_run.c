@@ -63,11 +63,11 @@
 #include <omp.h>
 #endif
 
-#include "k3_output.h"
 #include "k3_portable_io.h"   /* getline() shim for MinGW; see the header for why */
 #include "k3.h"
 #include "k3_bind.h"
 #include "k3_cache.h"
+#include "k3_output.h"
 #include "k3_trunk.h"
 #include "k3_tok.h"   /* text in/out; the --ids path never touches it */
 #include "k3_chat.h"
