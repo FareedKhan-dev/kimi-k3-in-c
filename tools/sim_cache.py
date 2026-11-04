@@ -132,6 +132,8 @@ def main():
         ap.error(str(error))
     if raw.size == 0:
         ap.error("trace must contain at least one request")
+    if raw.size % 2:
+        ap.error("trace read ended with an incomplete int32 pair")
     pairs = raw.reshape(-1, 2)
     layers, experts = pairs[:, 0], pairs[:, 1]
     if np.any(layers < 0) or np.any(experts < 0) or np.any(experts >= (1 << 20)):
