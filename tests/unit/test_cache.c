@@ -114,6 +114,26 @@ int main(int argc, char **argv)
                            cache.nslot, NE, c.topk);
       ck(cache.nslot >= c.topk + 1 && cache.nslot < NE, "cache under pressure", b); }
 
+    /* CLI can opt out of unbounded diagnostic memory without changing serving. */
+    {
+        K3ExpertQ q;
+        ck(cache.src.get(&cache.src, 0, 0, &q) == 0 && cache.ntrace == 2,
+           "library tracing remains enabled by default", "one request");
+        k3_cache_set_trace(&cache, 0);
+        int served = 1;
+        for (int i = 0; i < 1000; i++)
+            if (cache.src.get(&cache.src, 0, i % NE, &q) != 0) served = 0;
+        ck(served && !cache.trace && !cache.ntrace && !cache.captrace,
+           "disabled tracing allocates no request buffer", "1000 served requests");
+        k3_cache_set_trace(&cache, 1);
+        int first = cache.src.get(&cache.src, 0, 1, &q);
+        int second = cache.src.get(&cache.src, 0, 2, &q);
+        ck(!first && !second && cache.ntrace == 4 &&
+           cache.trace[0] == 0 && cache.trace[1] == 1 &&
+           cache.trace[2] == 0 && cache.trace[3] == 2,
+           "re-enabled trace preserves request order", "only subsequent requests");
+    }
+
     /* ---- 1+3: serial path, every expert, under eviction pressure ---- */
     int bad = 0;
     for (int pass = 0; pass < 3; pass++)
