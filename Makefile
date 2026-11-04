@@ -267,7 +267,10 @@ $(BIN)/test_trunk: tests/unit/test_trunk.c $(BUILD)/src/io/k3_trunk.o \
 $(BIN)/bench_kernels: benchmarks/bench_kernels.c $(BUILD)/src/core/k3_ops.o | $(BIN)
 	$(CC) $(CFLAGS) $(INCLUDES) $(filter %.c %.o,$^) -o $@ $(LDFLAGS)
 
-$(ENGINE_OBJ) $(CLI_BIN) $(TEST_BINS) $(WEIGHT_BINS) $(BIN)/bench_kernels: $(BUILD_CONFIG)
+# Conservative header dependencies also cover the directly compiled test/CLI
+# sources; a header edit must not leave a successful but stale executable.
+BUILD_HEADERS := $(wildcard include/k3/*.h third_party/*.h src/*/*.h)
+$(ENGINE_OBJ) $(CLI_BIN) $(TEST_BINS) $(WEIGHT_BINS) $(BIN)/bench_kernels: $(BUILD_CONFIG) $(BUILD_HEADERS)
 
 # A flag change may occur within the filesystem timestamp resolution. Force the
 # affected recipes based on content, not just the stamp's modification time.
