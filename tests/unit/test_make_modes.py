@@ -22,7 +22,7 @@ class BuildModes(unittest.TestCase):
             workspace = tmp / "source"
             workspace.mkdir()
             shutil.copy2(ROOT / "Makefile", workspace / "Makefile")
-            for folder in ("src", "include", "third_party"):
+            for folder in ("src", "include", "third_party", "tests/unit"):
                 shutil.copytree(ROOT / folder, workspace / folder)
             log = tmp / "compile.jsonl"
             driver = tmp / "cc.py"
