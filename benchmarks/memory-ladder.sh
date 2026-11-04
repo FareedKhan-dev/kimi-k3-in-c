@@ -151,4 +151,8 @@ if [ "$DIVERGED" -ne 0 ]; then
     exit 1
 fi
 echo
+if [ -z "$REF" ]; then
+    echo "No successful rung; output equivalence was not evaluated."
+    exit 1
+fi
 echo "Output identical at every rung. Machine details: $OUT/machine.txt"

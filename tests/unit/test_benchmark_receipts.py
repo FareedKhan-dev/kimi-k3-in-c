@@ -50,7 +50,7 @@ class ReceiptFields(unittest.TestCase):
 class FreshResults(unittest.TestCase):
     def test_fresh_receipt_required_and_valid_new_output_accepted(self):
         for script in ("memory-ladder.sh", "split-sweep.sh"):
-            for produces in (False, True):
+            for produces in (False, True, "oom"):
                 with self.subTest(script=script, produces=produces), tempfile.TemporaryDirectory() as tmp:
                     root = Path(tmp)
                     for folder in ("commands", "bin", "model", "trunk", "out"):
@@ -66,7 +66,8 @@ class FreshResults(unittest.TestCase):
                                                 "if [ \"$1\" = ./bin/k3 ]; then exec \"$@\"; fi\n"
                                                 "shift\ndone\nexit 0\n",
                         "commands/column": "#!/bin/sh\nexit 0\n",
-                        "bin/k3": engine if produces else "#!/bin/sh\nexit 0\n",
+                        "bin/k3": ("#!/bin/sh\nexit 137\n" if produces == "oom" else
+                                   engine if produces else "#!/bin/sh\nexit 0\n"),
                     }
                     for name, text in commands.items():
                         path = root / name
@@ -85,15 +86,16 @@ class FreshResults(unittest.TestCase):
                     args.append("1")
                     env = dict(os.environ, PATH=str(root / "commands") + os.pathsep + os.environ["PATH"])
                     result = subprocess.run(args, cwd=root, env=env, capture_output=True, text=True, check=False)
-                    self.assertEqual(result.returncode, 0 if produces else 1,
+                    self.assertEqual(result.returncode, 0 if produces is True else 1,
                                      result.stdout + result.stderr)
-                    if produces:
+                    if produces is True:
                         self.assertIn("Output identical at every", result.stdout)
                         for tag in tags:
                             value = json.loads((root / "out" / (tag + ".json")).read_text())
                             self.assertEqual(value["seconds_per_token"], 2.5)
                     else:
-                        self.assertIn("fresh result", result.stdout)
+                        if produces is False:
+                            self.assertIn("fresh result", result.stdout)
                         self.assertNotIn("Output identical at every", result.stdout)
                         for tag in tags:
                             self.assertEqual((root / "out" / (tag + ".json")).read_text(), old)
