@@ -132,6 +132,10 @@ int main(int argc, char **argv)
            cache.trace[0] == 0 && cache.trace[1] == 1 &&
            cache.trace[2] == 0 && cache.trace[3] == 2,
            "re-enabled trace preserves request order", "only subsequent requests");
+        uint64_t requests = 0;
+        for (int i = 0; i < NE; i++) requests += cache.hist[i];
+        ck(requests == 1003 && cache.hits + cache.misses == 1003,
+           "trace toggles preserve histogram and counts", "1003 model requests");
     }
 
     /* ---- 1+3: serial path, every expert, under eviction pressure ---- */
