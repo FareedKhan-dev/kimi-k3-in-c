@@ -817,6 +817,17 @@ static int parse_int_strict(const char *s, int *out)
 }
 
 
+/* Consume the entire value: atof("0.7oops") quietly runs a different experiment. */
+static int parse_double_strict(const char *s, double *out)
+{
+    char *end = NULL;
+    errno = 0;
+    double v = strtod(s, &end);
+    if (errno == ERANGE || end == s || *end || !isfinite(v)) return -1;
+    *out = v;
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     /* Informational flags are answered before anything else, because they must work
@@ -878,7 +889,18 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--prompt-file") && i + 1 < argc) prompt_file = argv[++i];
         else if (!strcmp(argv[i], "--tok") && i + 1 < argc) tok_dir = argv[++i];
         else if (!strcmp(argv[i], "--config") && i + 1 < argc) cfg_path = argv[++i];
-        else if (!strcmp(argv[i], "--gen") && i + 1 < argc) { gen = atoi(argv[++i]); gen_set = 1; }
+        else if ((!strcmp(argv[i], "--gen") || !strcmp(argv[i], "--spec") ||
+                  !strcmp(argv[i], "--trunk-ring")) && i + 1 < argc) {
+            int *dest = !strcmp(argv[i], "--gen") ? &gen :
+                        !strcmp(argv[i], "--spec") ? &spec_n : &trunk_ring;
+            if (parse_int_strict(argv[i + 1], dest) || *dest < 0) {
+                fprintf(stderr, "%s %s: expected a non-negative integer\n",
+                        argv[i], argv[i + 1]);
+                return 2;
+            }
+            if (dest == &gen) gen_set = 1;
+            i++;
+        }
         else if (!strcmp(argv[i], "--stop-id") && i + 1 < argc) {
             if (n_stop >= (int)(sizeof stop_id / sizeof stop_id[0])) {
                 fprintf(stderr, "--stop-id given more than %d times\n",
@@ -890,9 +912,9 @@ int main(int argc, char **argv)
              * anything that is not entirely a non-negative integer; the range check
              * against the vocabulary has to wait until config.json has been read. */
             {
-                char *end;
-                const long v = strtol(argv[++i], &end, 10);
-                if (*argv[i] == '\0' || *end != '\0' || v < 0) {
+                int v;
+                i++;
+                if (parse_int_strict(argv[i], &v) || v < 0) {
                     fprintf(stderr, "--stop-id %s: expected a non-negative token id\n",
                             argv[i]);
                     return 2;
@@ -900,7 +922,24 @@ int main(int argc, char **argv)
                 stop_id[n_stop++] = (int)v;
             }
         }
-        else if (!strcmp(argv[i], "--cache-gb") && i + 1 < argc) cache_gb = atof(argv[++i]);
+        else if ((!strcmp(argv[i], "--cache-gb") ||
+                  !strcmp(argv[i], "--draft-trunk-gb") ||
+                  !strcmp(argv[i], "--trunk-gb")) && i + 1 < argc) {
+            double *dest = !strcmp(argv[i], "--cache-gb") ? &cache_gb :
+                           !strcmp(argv[i], "--draft-trunk-gb") ? &draft_gb : &trunk_gb;
+            if (dest == &trunk_gb && !strcmp(argv[i + 1], "auto")) {
+                budget_auto = 1;
+            } else {
+                if (parse_double_strict(argv[i + 1], dest) || *dest < 0.0 ||
+                    *dest >= (double)INT64_MAX / 1e9) {
+                    fprintf(stderr, "%s %s: expected a finite non-negative GB budget\n",
+                            argv[i], argv[i + 1]);
+                    return 2;
+                }
+                if (dest == &trunk_gb) budget_auto = 0;
+            }
+            i++;
+        }
         else if (!strcmp(argv[i], "--layers") && i + 1 < argc) {
             /* Syntax here, range later: the range check needs the layer count
              * from config.json, but "1junk" must not survive until then as a
@@ -914,18 +953,10 @@ int main(int argc, char **argv)
         }
         else if (!strcmp(argv[i], "--out") && i + 1 < argc) { outp = argv[++i]; out_set = 1; }
         else if (!strcmp(argv[i], "--trunk") && i + 1 < argc) trunk_dir = argv[++i];
-        else if (!strcmp(argv[i], "--spec") && i + 1 < argc) spec_n = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--tf-check")) tf_check = 1;
         else if (!strcmp(argv[i], "--load-state") && i + 1 < argc) load_state = argv[++i];
         else if (!strcmp(argv[i], "--save-state") && i + 1 < argc) save_state = argv[++i];
         else if (!strcmp(argv[i], "--draft-trunk") && i + 1 < argc) draft_dir = argv[++i];
-        else if (!strcmp(argv[i], "--draft-trunk-gb") && i + 1 < argc) draft_gb = atof(argv[++i]);
-        else if (!strcmp(argv[i], "--trunk-gb") && i + 1 < argc) {
-            const char *v = argv[++i];
-            if (!strcmp(v, "auto")) budget_auto = 1;
-            else { trunk_gb = atof(v); budget_auto = 0; }
-        }
-        else if (!strcmp(argv[i], "--trunk-ring") && i + 1 < argc) trunk_ring = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--threads") && i + 1 < argc) {
             /* Strict for the same reason as --layers: atoi("8x") is 8 and a typo
              * should not silently pick a different thread count than the one typed. */
@@ -940,13 +971,23 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--chat")) chat = 1;
         else if (!strcmp(argv[i], "--system") && i + 1 < argc) system_text = argv[++i];
         else if (!strcmp(argv[i], "--history") && i + 1 < argc) history_path = argv[++i];
-        else if (!strcmp(argv[i], "--temperature") && i + 1 < argc) { temperature = atof(argv[++i]); temperature_set = 1; }
-        else if (!strcmp(argv[i], "--top-p") && i + 1 < argc) { top_p = atof(argv[++i]); top_p_set = 1; }
+        else if ((!strcmp(argv[i], "--temperature") || !strcmp(argv[i], "--top-p")) &&
+                 i + 1 < argc) {
+            double *dest = !strcmp(argv[i], "--temperature") ? &temperature : &top_p;
+            if (parse_double_strict(argv[i + 1], dest)) {
+                fprintf(stderr, "%s %s: expected a finite number\n", argv[i], argv[i + 1]);
+                return 2;
+            }
+            if (dest == &temperature) temperature_set = 1;
+            else top_p_set = 1;
+            i++;
+        }
         else if (!strcmp(argv[i], "--seed") && i + 1 < argc) {
             const char *value = argv[++i];
             char *end = NULL;
             errno = 0; seed = strtoull(value, &end, 10);
-            if (value[0] == '-' || errno || !end || *end) { fprintf(stderr, "--seed needs an unsigned integer\n"); return 2; }
+            if (value[strspn(value, " \t\n\r\v\f")] == '-' ||
+                errno || end == value || *end) { fprintf(stderr, "--seed needs an unsigned integer\n"); return 2; }
             seed_set = 1;
         }
         else if (!strcmp(argv[i], "--top-k") && i + 1 < argc) {
