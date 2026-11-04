@@ -35,10 +35,16 @@ def f32_to_bf16(f32):
     return ((u + rounding) >> 16).astype(np.uint16)
 
 
+def validate_group(group, cols):
+    if group < 0 or (group and cols % group):
+        raise ValueError("group must be zero (per-row) or a positive divisor of every matrix width")
+
+
 def qdq(f32, bits, group):
     rows, cols = f32.shape
+    validate_group(group, cols)
     qmax = (1 << (bits - 1)) - 1          # 127 for int8, 7 for int4
-    if group and group > 0 and cols % group == 0:
+    if group:
         g = f32.reshape(rows, cols // group, group)
         scale = np.abs(g).max(axis=2, keepdims=True) / qmax
         scale[scale == 0] = 1.0
@@ -59,6 +65,16 @@ def main():
     args = ap.parse_args()
 
     man = json.load(open(os.path.join(args.src, "trunk.json")))
+    # Preflight every eligible matrix before copying a potentially 110 GB trunk.
+    try:
+        validate_group(args.group, 0)
+        for lay in man["layers"]:
+            for tensor in lay["tensors"].values():
+                shape = tensor.get("shape") or []
+                if tensor.get("dtype") in ("BF16", "bf16") and len(shape) == 2:
+                    validate_group(args.group, int(shape[1]))
+    except ValueError as error:
+        ap.error(str(error))
     os.makedirs(args.dst, exist_ok=True)
     shutil.copyfile(os.path.join(args.src, "trunk.json"),
                     os.path.join(args.dst, "trunk.json"))
