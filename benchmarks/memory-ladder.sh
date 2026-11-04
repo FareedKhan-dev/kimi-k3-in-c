@@ -77,11 +77,13 @@ for rung in $rungs; do
         # ceiling swaps instead of dying: the run "passes" and its s/token measures swap
         # bandwidth rather than the configuration under test. That is a wrong number
         # wearing the shape of a right one, which is worse than a missing row.
+        # A private fresh path cannot reuse a previous campaign's successful JSON.
+        RESULT=$(mktemp "$OUT/$tag.json.XXXXXX") || exit 1
         systemd-run --scope --user -q \
             -p MemoryMax=${TOT}G -p MemorySwapMax=0 \
             ./bin/k3 "$MODEL" --ids "$IDS" --gen "$GEN" \
             --trunk "$TRUNK" --trunk-gb "$TR" --cache-gb "$CA" --incremental \
-            --out "$OUT/$tag.json" > "$OUT/$tag.log" 2>&1
+            --out "$RESULT" > "$OUT/$tag.log" 2>&1
         rc=$?
 
         if [ $rc -ne 0 ]; then
@@ -98,18 +100,13 @@ for rung in $rungs; do
             exit 1
         fi
 
-        SPT=$(grep -oE '[0-9.]+ s/token average' "$OUT/$tag.log" | tail -1 | awk '{print $1}')
-        RSS=$(grep -oE 'PEAK RSS for the whole run: [0-9.]+' "$OUT/$tag.log" | tail -1 | awk '{print $7}')
-        GBR=$(grep -oE 'read from disk: [0-9.]+ GB' "$OUT/$tag.log" | tail -1 | awk '{print $4}')
-        IDSO=$(python3 -c "import json,sys;print(','.join(map(str,json.load(open(sys.argv[1]))['generated_ids'])))" "$OUT/$tag.json" 2>/dev/null)
-
-        # The determinism assertion is the entire point of this harness, so it must not
-        # pass vacuously. An unreadable result file leaves IDSO empty, and comparing
-        # empty against empty would "confirm" identical output at every rung.
-        if [ -z "$IDSO" ]; then
-            echo "   *** could not read generated_ids from $OUT/$tag.json ***"
+        METRICS=$(python3 "$(dirname "$0")/read_result.py" "$RESULT" "$IDS" "$GEN") || {
+            echo "   *** invalid or missing fresh result: $RESULT ***"
             exit 1
-        fi
+        }
+        IFS=$'\t' read -r SPT RSS GBR IDSO <<< "$METRICS"
+        mv -f "$RESULT" "$OUT/$tag.json" || exit 1
+
         if [ -z "$REF" ]; then
             REF="$IDSO"; REF_RUNG="${TOT} GB rep $r"
         elif [ "$IDSO" != "$REF" ]; then
@@ -154,4 +151,8 @@ if [ "$DIVERGED" -ne 0 ]; then
     exit 1
 fi
 echo
-echo "Output identical at every rung. Machine details: $OUT/machine.txt"
+if [ -z "$REF" ]; then
+    echo "No successful rung; output equivalence was not evaluated."
+    exit 1
+fi
+echo "Output identical across successful runs. Machine details: $OUT/machine.txt"
