@@ -137,3 +137,10 @@ checks its layer/token-count metadata, and records its retained path in
 records; a successful exit without recorded checks does not certify a layer.
 These retained per-layer dumps require additional disk space. They are execution
 receipts, not independent proof of checkpoint identity or truthful computation.
+
+The stage contract follows `verify_real_layer.py`: layer0 requires `x_norm`,
+`attn_out`, `dense_out`; other layers require `x_norm`, `attn_out`,
+`route_wt (id-sorted)`, `moe_out`. Absolute/relative errors and budgets must be
+finite and usable. The reported error-to-budget ratio is approximate because
+those values have different printed precision; the verifier's stage flag remains
+authoritative rather than thresholding the rounded ratio again.

@@ -41,7 +41,7 @@ import sys
 import tempfile
 import time
 
-STAGE_RE = re.compile(r"^\s{2}(\S+)\s+max\|diff\|\s+(\S+)\s+rel\s+(\S+)\s+budget\s+(\S+)\s+(OK|MISMATCH)")
+STAGE_RE = re.compile(r"^\s{2}(.+?)\s+max\|diff\|\s+(\S+)\s+rel\s+(\S+)\s+budget\s+(\S+)\s+(OK|MISMATCH)")
 
 
 def dump_kind(path, layer, tokens):
@@ -108,17 +108,26 @@ def main():
             m = STAGE_RE.match(line)
             if m:
                 try:
+                    absolute = float(m.group(2))
                     rel, budget = float(m.group(3)), float(m.group(4))
-                    valid = (math.isfinite(rel) and rel >= 0 and math.isfinite(budget) and
-                             budget > 0 and math.isfinite(rel / budget) and m.group(5) == "OK")
+                    valid = (math.isfinite(absolute) and absolute >= 0 and math.isfinite(rel) and
+                             rel >= 0 and math.isfinite(budget) and budget > 0 and
+                             math.isfinite(rel / budget) and m.group(5) == "OK")
                 except ValueError:
                     invalid_stage = True
                     continue
                 invalid_stage = invalid_stage or not valid
-                stages[m.group(1)] = {"rel": rel if math.isfinite(rel) else None,
+                stages[m.group(1)] = {"max_abs": absolute if math.isfinite(absolute) else None,
+                                      "rel": rel if math.isfinite(rel) else None,
                                       "budget": budget if math.isfinite(budget) else None, "ok": valid}
-        evidence = bool(stages) and not invalid_stage
+        # The owning verifier emits these numeric stages for its fixed 93-layer
+        # model contract. A subset (or an ignored spaced router label) is not enough.
+        expected = {"x_norm", "attn_out", "dense_out"} if L == 0 else {
+            "x_norm", "attn_out", "route_wt (id-sorted)", "moe_out"}
+        evidence = expected.issubset(stages) and not invalid_stage
         ok = v.returncode == 0 and evidence
+        # Printed rel/budget values are rounded differently by the verifier. The
+        # ratio is approximate; its OK/MISMATCH flag remains the numeric verdict.
         worst = max((s["rel"] / s["budget"] for s in stages.values())) if evidence else None
         rows.append({"layer": L, "kind": kind, "ok": ok, "stages": stages,
                      "worst_ratio": worst, "seconds": time.time() - t0, "dump_path": dump_path,
