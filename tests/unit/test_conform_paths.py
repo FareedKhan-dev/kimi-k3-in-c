@@ -1,6 +1,7 @@
 """Resolve harness input paths before changing the subprocess working directory."""
 import importlib.util
 import io
+import json
 import os
 import sys
 import tempfile
@@ -24,15 +25,21 @@ class ConformancePaths(unittest.TestCase):
                 root = Path(tmp).resolve()
                 (root / "bin").mkdir()
                 (root / "bin/real_layer.json").write_text('{"is_mla":1}')
-                responses = [SimpleNamespace(returncode=0, stdout="", stderr=""),
-                             SimpleNamespace(returncode=0, stdout=
-                                             "  attention max|diff| 0 rel 0 budget 1 OK", stderr="")]
+                def child(args, **kwargs):
+                    if str(args[0]).endswith("test_real_layer"):
+                        target = Path(args[5]) if len(args) > 5 else Path(args[0]).parent / "real_layer.json"
+                        target.write_text(json.dumps({"layer": int(args[2]), "T": int(args[3]), "is_mla": 1},
+                                                     separators=(",", ":")))
+                        return SimpleNamespace(returncode=0, stdout="", stderr="")
+                    stages = ("x_norm", "attn_out", "dense_out")
+                    output = "\n".join(f"  {name} max|diff| 0 rel 0 budget 1 OK" for name in stages)
+                    return SimpleNamespace(returncode=0, stdout=output, stderr="")
                 old_cwd = os.getcwd()
                 try:
                     os.chdir(root)
                     with patch.object(sys, "argv", ["conform_all.py", "weights", "bin",
                                                    python, "0", "0"]), \
-                         patch.object(conform.subprocess, "run", side_effect=responses) as run, \
+                         patch.object(conform.subprocess, "run", side_effect=child) as run, \
                          redirect_stdout(io.StringIO()):
                         self.assertEqual(conform.main(), 0)
                     first, second = run.call_args_list
