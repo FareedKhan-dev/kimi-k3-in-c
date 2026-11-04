@@ -167,3 +167,7 @@ the bounded histogram and cache serving remain active. Call with `1` to record
 subsequent requests again. The CLI enables request tracing only when
 `--dump-cache-trace` is supplied, so ordinary inference does not retain this
 unbounded diagnostic history.
+
+Change trace collection only between cache requests; the toggle is not a
+synchronization primitive for concurrent cache use. Rebuild consumers when the
+public cache structure changes.
