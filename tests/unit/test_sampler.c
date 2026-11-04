@@ -143,6 +143,34 @@ int main(void)
         k3_sampler_free(&s_narrow);
     }
 
+    /* Nucleus mass is relative to the surviving top-k distribution. With
+     * four tied logits, top-k=2 gives each survivor mass 1/2, so top-p=.4
+     * must retain exactly the first one, rather than both at original 1/4. */
+    {
+        float tied[] = {0.0f, 0.0f, 0.0f, 0.0f};
+        K3Sampler s;
+        int only_first = 1;
+        k3_sampler_init(&s, 1.0, 0.4, 2, 7, 0);
+        for (i = 0; i < 200; i++) {
+            if (k3_sampler_next(&s, tied, 4, 0, &a) || a != 0)
+                only_first = 0;
+        }
+        ok(only_first, "top-p is relative to the retained top-k mass");
+        k3_sampler_free(&s);
+
+        /* Unequal mass: original probabilities are 4/10, 3/10, 2/10,
+         * 1/10. After top-k=2 the best token has mass 4/7 > .5. */
+        float weighted[] = {logf(4.0f), logf(3.0f), logf(2.0f), 0.0f};
+        only_first = 1;
+        k3_sampler_init(&s, 1.0, 0.5, 2, 7, 0);
+        for (i = 0; i < 200; i++) {
+            if (k3_sampler_next(&s, weighted, 4, 0, &a) || a != 0)
+                only_first = 0;
+        }
+        ok(only_first, "normalized nucleus handles unequal top-k probabilities");
+        k3_sampler_free(&s);
+    }
+
     /* Invalid configurations are refused, never sampled from. */
     {
         K3Sampler bad;
