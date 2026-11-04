@@ -49,6 +49,14 @@ def main():
         print("usage: int8_trunk.py <bf16_trunk_dir> <int8_out_dir>")
         return 2
     src, out = sys.argv[1], sys.argv[2]
+    if os.path.realpath(src) == os.path.realpath(out):
+        print("output must not alias the source container directory", file=sys.stderr)
+        return 2
+    for name in ("trunk.bin", "trunk.json"):
+        source, target = os.path.join(src, name), os.path.join(out, name)
+        if os.path.exists(source) and os.path.exists(target) and os.path.samefile(source, target):
+            print("output %s aliases the source file" % name, file=sys.stderr)
+            return 2
     os.makedirs(out, exist_ok=True)
     man = json.load(open(os.path.join(src, "trunk.json")))
     binp = open(os.path.join(src, "trunk.bin"), "rb")
