@@ -173,6 +173,8 @@ int main(void)
         };
         K3Sampler s;
         k3_sampler_init(&s, 1.0, 1.0, 0, 7, 0);
+        ok(k3_sampler_next(NULL, logits, 4, 0, &a) != 0,
+           "NULL sampler is rejected");
         int refused = 1;
         uint64_t state = s.state;
         for (int row = 0; row < 4; row++) {
