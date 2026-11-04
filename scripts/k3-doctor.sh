@@ -114,10 +114,18 @@ if [ -d "$TARGET" ]; then
         trap 'exit 143' TERM
         if dd if=/dev/zero of="$TMPF" bs=1M count=2048 conv=fsync 2>/dev/null; then
             sync
-            RATE=$(dd if="$TMPF" of=/dev/null bs=4M 2>&1 | awk '/copied/{print $(NF-1)" "$NF}')
+            if READ_OUT=$(dd if="$TMPF" of=/dev/null bs=4M 2>&1); then
+                RATE=$(printf '%s\n' "$READ_OUT" | awk '/copied/{print $(NF-1)" "$NF}')
+                if [ -n "$RATE" ]; then
+                    ok "sequential read: $RATE"
+                    printf '  %sthe engine streams ~135 GB per token; storage is usually the ceiling%s\n' "$DIM" "$RST"
+                else
+                    warn "could not parse the probe read rate"
+                fi
+            else
+                warn "could not read the probe file at $TARGET"
+            fi
             rm -f "$TMPF"
-            ok "sequential read: ${RATE:-unknown}"
-            printf '  %sthe engine streams ~135 GB per token; storage is usually the ceiling%s\n' "$DIM" "$RST"
         else
             warn "could not write a probe file to $TARGET"
             rm -f "$TMPF" 2>/dev/null
