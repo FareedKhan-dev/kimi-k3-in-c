@@ -1,0 +1,61 @@
+"""Build-mode regression with a recording compiler, no real compilation."""
+import json
+import os
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+@unittest.skipUnless(shutil.which("make") and os.name != "nt",
+                     "POSIX make and executable recording compiler are required")
+class BuildModes(unittest.TestCase):
+    def test_mode_changes_rebuild_all_engine_objects(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            log = tmp / "compile.jsonl"
+            driver = tmp / "cc.py"
+            driver.write_text(
+                f"#!{sys.executable}\nimport json,sys\nfrom pathlib import Path\n"
+                f"with open({str(log)!r}, 'a') as f: f.write(json.dumps(sys.argv[1:])+'\\n')\n"
+                "Path(sys.argv[sys.argv.index('-o')+1]).touch()\n"
+            )
+            driver.chmod(0o755)
+            compiler = shlex.quote(str(driver))
+            common = ["make", f"CC={compiler}", f"SANITIZER_CC={compiler}",
+                      f"BUILD={tmp / 'build'}", f"BIN={tmp / 'bin'}",
+                      "OMP_CFLAGS=", "OMP_LDFLAGS=", "SANITIZER_DLLS="]
+            env = {k: v for k, v in os.environ.items()
+                   if k not in ("MAKEFLAGS", "MFLAGS", "MAKELEVEL")}
+
+            def build(target=None):
+                log.write_text("")
+                result = subprocess.run(common + ([target] if target else []), cwd=ROOT, env=env,
+                                        capture_output=True, text=True, check=False)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                return [json.loads(line) for line in log.read_text().splitlines()]
+
+            initial = build()
+            self.assertEqual(sum("-c" in cmd for cmd in initial), 6)
+            portable = build("portable")
+            self.assertEqual(sum("-c" in cmd for cmd in portable), 6)
+            self.assertFalse(any("-mcpu=native" in cmd or "-march=native" in cmd
+                                 for cmd in portable))
+            self.assertEqual(build("portable"), [])
+            sanitized = build("asan")
+            self.assertEqual(sum("-c" in cmd for cmd in sanitized), 6)
+            self.assertTrue(all("-fsanitize=address,undefined" in cmd
+                                for cmd in sanitized))
+            restored = build("all")
+            self.assertEqual(sum("-c" in cmd for cmd in restored), 6)
+            self.assertFalse(any("-fsanitize=address,undefined" in cmd
+                                 for cmd in restored))
+
+
+if __name__ == "__main__":
+    unittest.main()
