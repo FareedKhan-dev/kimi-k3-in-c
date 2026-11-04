@@ -24,7 +24,7 @@ import os
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(os.path.dirname(HERE))
+ROOT = os.path.dirname(HERE)
 
 
 def find_files():
@@ -36,13 +36,16 @@ def find_files():
     missing-path error -- the most misleading possible framing, since the tokenizer is
     fine.
 
-    Order: explicit K3_TOK_FILES, the in-repo location, then conventional spots. On
-    failure every candidate is listed, so the fix is obvious rather than guessed at.
+    An explicit K3_TOK_FILES is authoritative; a missing selection must not
+    silently pick a different vocabulary. Otherwise try the in-repo location,
+    then conventional spots, and list every candidate on failure.
     """
     cands = []
     env = os.environ.get("K3_TOK_FILES")
     if env:
-        cands.append(env)
+        if os.path.isfile(os.path.join(env, "tiktoken.model")):
+            return env
+        raise SystemExit("K3_TOK_FILES has no tiktoken.model: " + env)
     cands += [
         os.path.join(ROOT, "kimi_k3_hf", "files"),
         os.path.join(os.path.dirname(ROOT), "kimi_k3_hf", "files"),
