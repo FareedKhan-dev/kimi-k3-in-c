@@ -14,9 +14,10 @@
  *             -p MemoryMax=` scope, so under a 12 GB cap the plan printed
  *             `available 65.56 GB` (tests/fixtures/gates/gates.txt:219, :229) and
  *             admitted a run the kernel then OOM-killed. The figure is
- *             min(MemAvailable, tightest cgroup ancestor's limit - usage). v2 is
+ *             min(MemAvailable, tightest cgroup ancestor's limit - working set),
+ *             where working set is usage minus active/inactive file cache. v2 is
  *             authoritative where its memory controller is visible; v1 only when
- *             it is not. A control file that is PRESENT but garbled or unreadable
+ *             it is not. A limit or usage file that is PRESENT but garbled or unreadable
  *             fails CLOSED (k3_mem_probe reports malformed, and the bytes figure
  *             is 0 with known set): that says the budget is unknowable, not that
  *             it is unlimited. See the K3MemAvail contract below.
@@ -74,7 +75,7 @@ typedef struct {
     double host;
     double cgroup;
     double cgroup_limit;     /* the binding limit itself, for the banner */
-    double cgroup_usage;     /* usage charged against that limit */
+    double cgroup_usage;     /* usage less reclaimable file cache at that limit */
     int    cgroup_v;
     char   limit_path[640];  /* wide enough for any probe path built below */
     char   detail[1024];
@@ -134,6 +135,52 @@ static int k3_mem_file_exists(const char *path)
     return stat(path, &st) == 0;
 }
 
+/* Optional reclaimable file cache. v1 needs the hierarchical total_* counters to
+ * match usage_in_bytes. Missing counters contribute zero; an unreadable or malformed
+ * stat contributes nothing at all, including any counters read before the error.
+ * Do not use `file`: that includes tmpfs/shmem, which is not reclaimable this way. */
+static double k3_mem_file_cache(const char *dir, int v1)
+{
+    char path[600];
+    snprintf(path, sizeof path, "%s/memory.stat", dir);
+    FILE *f = fopen(path, "r");
+    if (!f) return 0.0;
+    double cache = 0.0;
+    unsigned seen = 0;
+    for (;;) {
+        char line[256], key[64], value[64], extra;
+        size_t n = 0;
+        int c;
+        while ((c = fgetc(f)) != EOF && c != '\n') {
+            if (!c || n + 1 >= sizeof line) goto invalid;
+            line[n++] = (char)c;
+        }
+        if (c == EOF && !n) break;
+        line[n] = 0;
+        if (sscanf(line, "%63s %63s %c", key, value, &extra) != 2
+            || value[0] < '0' || value[0] > '9') goto invalid;
+        char *end = NULL;
+        errno = 0;
+        unsigned long long u = strtoull(value, &end, 10);
+        if (errno || !end || *end) goto invalid;
+        unsigned bit = 0;
+        if (!strcmp(key, v1 ? "total_inactive_file" : "inactive_file")) bit = 1;
+        if (!strcmp(key, v1 ? "total_active_file" : "active_file")) bit = 2;
+        if (bit) {
+            if (seen & bit) goto invalid;
+            seen |= bit;
+            cache += (double)u;  /* add as doubles so two u64 counters cannot wrap */
+        }
+    }
+    if (ferror(f)) goto invalid;
+    fclose(f);
+    return cache;
+
+invalid:
+    fclose(f);
+    return 0.0;
+}
+
 /* Strip the last path component in place; returns 0 at the top. */
 static int k3_mem_parent(char *path, const char *root)
 {
@@ -147,7 +194,7 @@ static int k3_mem_parent(char *path, const char *root)
 
 /* One hierarchy. Returns 1 if a memory controller was seen anywhere on the walk (so
  * the caller treats this hierarchy as authoritative), 0 if not, -1 on a malformed
- * file. *remaining is the tightest finite (limit - usage), or -1. */
+ * file. *remaining is the tightest finite (limit - working set), or -1. */
 static int k3_mem_walk(const char *root, const char *member, const char *limit_name,
                        const char *usage_name, double unlimited_at, double *remaining,
                        K3MemAvail *out)
@@ -191,6 +238,8 @@ static int k3_mem_walk(const char *root, const char *member, const char *limit_n
                 int ru = k3_mem_read_u64(up, &use, NULL, out);
                 if (ru < 0) return -1;
                 if (ru == 0) use = 0.0;
+                double cache = k3_mem_file_cache(dir, !strcmp(usage_name, "memory.usage_in_bytes"));
+                use = use > cache ? use - cache : 0.0;
                 double head = lim - use;
                 if (head < 0.0) head = 0.0;
                 if (*remaining < 0.0 || head < *remaining) {

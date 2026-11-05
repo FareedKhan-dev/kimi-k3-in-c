@@ -396,6 +396,135 @@ int main(int argc, char **argv)
                        "unknown: whole plan skips check");
     }
 
+    /* (m) File cache can be reclaimed before the cgroup kills an allocation.
+     * v1's total_* counters include descendants, just like usage_in_bytes. */
+    for (int v = 2; v >= 1; v--) {
+        static const struct {
+            const char *tag, *inactive, *active, *extra;
+            double room;
+        } cases[] = {
+            {"both file lists", "8589934592", "6442450944", "", 18},
+            {"inactive only", "8589934592", NULL, "", 12},
+            {"active only", NULL, "6442450944", "", 10},
+            {"empty memory.stat", NULL, NULL, "", 4},
+            {"absent memory.stat", NULL, NULL, NULL, 4},
+            {"anon/file/shmem are not room", "0", "0",
+             "anon 21474836480\nfile 21474836480\nshmem 21474836480\n", 4},
+            {"cache above usage", "17179869184", "8589934592", "", 24},
+            {"cache sum cannot wrap", "18446744073709551615", "18446744073709551615", "", 24},
+            {"negative inactive_file", "-8589934592", "6442450944", "", 4},
+            {"signed active_file", "8589934592", "+6442450944", "", 4},
+            {"malformed active_file", "8589934592", "garbage", "", 4},
+            {"active_file trailing junk", "8589934592", "6442450944x", "", 4},
+            {"active_file overflow", "8589934592", "18446744073709551616", "", 4},
+            {"fractional active_file", "8589934592", "1.5", "", 4},
+            {"missing active_file value", "8589934592", "", "", 4},
+            {"extra active_file value", "8589934592", "6442450944 1", "", 4},
+            {"duplicate inactive_file", "8589934592", "6442450944", "%sinactive_file 1\n", 4},
+            {"duplicate active_file", "8589934592", "6442450944", "%sactive_file 1\n", 4},
+            {"malformed later line", "8589934592", "6442450944", "broken\n", 4},
+            {"malformed unrelated count", "8589934592", "6442450944", "anon -1\n", 4},
+            {"overlong later line", "8589934592", "6442450944",
+             "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz"
+             "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz"
+             "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz"
+             "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz 1\n", 4},
+        };
+        const char *prefix = v == 1 ? "total_" : "";
+        const char *limit = v == 1 ? "memory.limit_in_bytes" : "memory.max";
+        const char *usage = v == 1 ? "memory.usage_in_bytes" : "memory.current";
+        const double gib = 1073741824.0;
+        for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+            char tag[80]; snprintf(tag, sizeof tag, "k-v%d-%zu", v, i);
+            Tree t; tree(&t, work, tag, 1);
+            put(t.root, "cgroup", v == 1 ? "4:memory:/\n" : "0::/\n");
+            put(t.sys, limit, "25769803776\n");  /* 24 GiB */
+            put(t.sys, usage, "21474836480\n");  /* 20 GiB */
+            char a[128] = "", b[128] = "", extra[512] = "", stat[1024];
+            if (cases[i].inactive)
+                snprintf(a, sizeof a, "%sinactive_file %s\n", prefix, cases[i].inactive);
+            if (cases[i].active)
+                snprintf(b, sizeof b, "%sactive_file %s\n", prefix, cases[i].active);
+            if (cases[i].extra) {
+                snprintf(extra, sizeof extra, cases[i].extra, prefix);
+                snprintf(stat, sizeof stat, "%s%s%s", a, b, extra);
+                put(t.sys, "memory.stat", stat);
+            }
+            K3MemAvail m;
+            int rc = k3_mem_available_at(t.meminfo, t.cgroup, t.sys, &m);
+            char d[2048], what[128];
+            snprintf(what, sizeof what, "v%d %s", v, cases[i].tag);
+            snprintf(d, sizeof d, "room %.0f GiB, expected %.0f", m.bytes / gib, cases[i].room);
+            ck(rc == 0 && m.known && !m.malformed && m.cgroup_v == v
+               && m.bytes == cases[i].room * gib && m.cgroup == m.bytes
+               && m.cgroup_limit == 24 * gib && m.cgroup_usage == (24 - cases[i].room) * gib,
+               what, d);
+        }
+
+        /* Each ancestor uses its own cache; the binding path may change. */
+        Tree t; tree(&t, work, v == 1 ? "k-v1-nested" : "k-v2-nested", 1);
+        put(t.root, "cgroup", v == 1 ? "4:memory:/parent/leaf\n" : "0::/parent/leaf\n");
+        put(t.sys, limit, v == 1 ? "9223372036854771712\n" : "max\n");
+        char leaf[900], mid[900], stat[256];
+        snprintf(leaf, sizeof leaf, "%s/parent/leaf", t.sys); mkdirs(leaf);
+        snprintf(mid, sizeof mid, "%s/parent", t.sys);
+        put(leaf, limit, "25769803776\n"); put(leaf, usage, "21474836480\n");
+        snprintf(stat, sizeof stat, "%sinactive_file 8589934592\n%sactive_file 6442450944\n", prefix, prefix);
+        put(leaf, "memory.stat", stat);
+        put(mid, limit, "17179869184\n"); put(mid, usage, "15032385536\n");
+        snprintf(stat, sizeof stat, "%sinactive_file 10737418240\n%sactive_file 2147483648\n", prefix, prefix);
+        put(mid, "memory.stat", stat);
+        K3MemAvail m;
+        int rc = k3_mem_available_at(t.meminfo, t.cgroup, t.sys, &m);
+        char what[128]; snprintf(what, sizeof what, "v%d parent cache: 14 GiB binds", v);
+        ck(rc == 0 && !m.malformed && m.bytes == 14 * gib
+           && strstr(m.limit_path, "/parent/memory.") != NULL, what, m.limit_path);
+
+        put(t.sys, limit, "12884901888\n"); put(t.sys, usage, "11811160064\n");
+        snprintf(stat, sizeof stat, "%sinactive_file 6442450944\n%sactive_file 2147483648\n", prefix, prefix);
+        put(t.sys, "memory.stat", stat);
+        rc = k3_mem_available_at(t.meminfo, t.cgroup, t.sys, &m);
+        snprintf(what, sizeof what, "v%d mount-root cache: 9 GiB binds", v);
+        char path[900]; snprintf(path, sizeof path, "%s/%s", t.sys, limit);
+        ck(rc == 0 && !m.malformed && m.bytes == 9 * gib
+           && !strcmp(m.limit_path, path), what, m.limit_path);
+
+        put(t.root, "meminfo", "MemAvailable: 8388608 kB\n");
+        rc = k3_mem_available_at(t.meminfo, t.cgroup, t.sys, &m);
+        snprintf(what, sizeof what, "v%d host still caps reclaimed room", v);
+        ck(rc == 0 && !m.malformed && m.bytes == 8 * gib && m.cgroup == 9 * gib, what, NULL);
+
+        /* Only counters from this hierarchy count, even when both spellings exist. */
+        snprintf(stat, sizeof stat,
+                 "inactive_file %s\nactive_file %s\ntotal_inactive_file %s\ntotal_active_file %s\n",
+                 v == 1 ? "11811160064" : "6442450944", v == 1 ? "11811160064" : "2147483648",
+                 v == 1 ? "6442450944" : "11811160064", v == 1 ? "2147483648" : "11811160064");
+        put(t.sys, "memory.stat", stat);
+        rc = k3_mem_available_at(t.meminfo, t.cgroup, t.sys, &m);
+        snprintf(what, sizeof what, "v%d ignores other hierarchy's counters", v);
+        ck(rc == 0 && !m.malformed && m.cgroup == 9 * gib, what, NULL);
+
+        /* Reclaim before clamping: raw usage can be higher than the limit. */
+        put(t.sys, usage, "13958643712\n");   /* 13 GiB - 8 GiB cache = 5 GiB */
+        rc = k3_mem_available_at(t.meminfo, t.cgroup, t.sys, &m);
+        snprintf(what, sizeof what, "v%d raw usage above limit can reclaim", v);
+        ck(rc == 0 && !m.malformed && m.cgroup == 7 * gib && m.bytes == 7 * gib, what, NULL);
+        put(t.sys, usage, "22548578304\n");   /* 21 GiB - 8 GiB cache > 12 GiB */
+        rc = k3_mem_available_at(t.meminfo, t.cgroup, t.sys, &m);
+        snprintf(what, sizeof what, "v%d working set above limit stays zero", v);
+        ck(rc == 0 && m.known && !m.malformed && m.cgroup == 0 && m.bytes == 0, what, NULL);
+
+        put(t.sys, limit, "garbage\n");
+        rc = k3_mem_available_at(t.meminfo, t.cgroup, t.sys, &m);
+        snprintf(what, sizeof what, "v%d bad limit with cache fails closed", v);
+        ck(rc == 0 && m.known && m.malformed && m.bytes == 0 && strstr(m.detail, limit), what, m.detail);
+
+        put(t.sys, limit, "12884901888\n"); put(t.sys, usage, "-1\n");
+        rc = k3_mem_available_at(t.meminfo, t.cgroup, t.sys, &m);
+        snprintf(what, sizeof what, "v%d bad usage with cache fails closed", v);
+        ck(rc == 0 && m.known && m.malformed && m.bytes == 0 && strstr(m.detail, usage), what, m.detail);
+    }
+
     printf("\n%s\n", g_fail ? "MEMORY PROBE TESTS FAILED" : "MEMORY PROBE TESTS PASSED");
     return g_fail ? 1 : 0;
 }
