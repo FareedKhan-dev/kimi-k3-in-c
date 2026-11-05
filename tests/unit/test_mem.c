@@ -29,6 +29,35 @@
 
 #include "k3_sysmem.h"
 
+/* Exercise the CLI's actual admission callers with the fixture probe below.
+ * Allocation failure stops an admitted chat turn before it needs model weights. */
+static K3MemAvail admission_memory;
+static int fail_chat_alloc;
+static double admission_probe(K3MemAvail *out)
+{
+    *out = admission_memory;
+    return out->bytes;
+}
+static void *admission_malloc(size_t n)
+{
+    return fail_chat_alloc ? NULL : malloc(n);
+}
+#define k3_mem_probe admission_probe
+#define malloc admission_malloc
+#define main k3_cli_main
+#include "../../src/cli/k3_run.c"
+#undef main
+#undef malloc
+#undef k3_mem_probe
+
+#ifdef _WIN32
+#define dup _dup
+#define dup2 _dup2
+#define close _close
+#else
+#include <unistd.h>
+#endif
+
 static int g_fail = 0;
 
 static void ck(int ok, const char *what, const char *detail)
@@ -84,6 +113,49 @@ static void tree(Tree *t, const char *work, const char *tag, int with_meminfo)
 }
 
 #define HOST_BYTES (68746240.0 * 1024.0)   /* 70.40 GB, the fake MemAvailable */
+
+/* Check the reason as well as the status: a missing checkpoint also exits nonzero.
+ * Run the real chat caller with all allocations refused, so an unknown reading
+ * reaches the buffer error while a known zero must stop earlier, naming KV. */
+static void admission_case(int chat, int automatic, int want_rc,
+                           const char *reason, const char *what)
+{
+    FILE *log = tmpfile();
+    int saved = dup(fileno(stderr));
+    if (!log || saved < 0 || dup2(fileno(log), fileno(stderr)) < 0) {
+        fprintf(stderr, "cannot capture admission diagnostic\n");
+        exit(1);
+    }
+    int rc;
+    if (chat) {
+        K3ChatHistory history; k3_chat_history_init(&history);
+        K3Cfg c; int fa[128]; real_cfg_hardcoded(&c, fa);
+        Weights w; memset(&w, 0, sizeof w);
+        int *prompt = NULL, *seq = NULL, tmax = 0;
+        float *h = NULL, *br = NULL, *sc = NULL;
+        fail_chat_alloc = 1;
+        rc = chat_run(NULL, NULL, &history, NULL, NULL, &prompt, 1, 1,
+                      1, 1, 1.0, 0.95, 0, 1, &w, &c, NULL,
+                      c.n_layers, &tmax, &h, &br, NULL, &sc, NULL, &seq,
+                      NULL, 1, 0, NULL);
+        fail_chat_alloc = 0;
+    } else {
+        char *args[] = {"k3", "tests/fixtures/st", "--config",
+                        "tests/fixtures/cfg/flat.json", "--ids", "1",
+                        "--incremental", "--layers", "1", NULL};
+        char *auto_args[] = {"k3", "fake", "--ids", "1", "--preset", "auto", NULL};
+        rc = automatic ? k3_cli_main((int)(sizeof auto_args / sizeof *auto_args) - 1, auto_args)
+                       : k3_cli_main((int)(sizeof args / sizeof *args) - 1, args);
+    }
+    fflush(stderr);
+    dup2(saved, fileno(stderr)); close(saved);
+    rewind(log);
+    char detail[8192];
+    size_t n = fread(detail, 1, sizeof detail - 1, log);
+    detail[n] = 0; fclose(log);
+    int ok = rc == want_rc && strstr(detail, reason) != NULL;
+    ck(ok, what, ok ? NULL : detail);
+}
 
 int main(int argc, char **argv)
 {
@@ -240,6 +312,31 @@ int main(int argc, char **argv)
         char d[2048]; snprintf(d, sizeof d, "bytes %.0f cgroup %.0f", m.bytes, m.cgroup);
         ck(rc == 0 && m.known && m.bytes == HOST_BYTES && m.cgroup == 137438953472.0,
            "loose cgroup: min() keeps the host figure", d);
+    }
+
+    /* (k) limit == usage is a measured zero, not permission to skip admission. */
+    {
+        Tree t; tree(&t, work, "k", 1);
+        put(t.root, "cgroup", "0::/\n");
+        put(t.sys, "memory.max", "1073741824\n");
+        put(t.sys, "memory.current", "1073741824\n");
+        int rc = k3_mem_available_at(t.meminfo, t.cgroup, t.sys, &admission_memory);
+        ck(rc == 0 && admission_memory.known && !admission_memory.malformed
+           && admission_memory.bytes == 0.0, "full cgroup: known zero headroom", NULL);
+        admission_case(0, 0, 2, "REFUSING: the KV cache", "known zero: startup refuses KV by name");
+        admission_case(1, 0, 1, "chat: KV cache", "known zero: chat refuses KV by name");
+        admission_case(0, 1, 2, "--preset auto", "known zero: auto still refuses");
+    }
+    /* (l) with neither host nor cgroup measurements, explicit budgets still pass
+     * the KV guard and reach the unrelated missing-model / buffer diagnostics. */
+    {
+        Tree t; tree(&t, work, "l", 0);
+        int rc = k3_mem_available_at(t.meminfo, t.cgroup, t.sys, &admission_memory);
+        ck(rc != 0 && !admission_memory.known && !admission_memory.malformed,
+           "no sources: admission remains unknown", NULL);
+        admission_case(0, 0, 1, "layers are missing tensors", "unknown: startup skips KV check");
+        admission_case(1, 0, 1, "chat: buffer allocation failed", "unknown: chat skips KV check");
+        admission_case(0, 1, 2, "--preset auto", "unknown: auto still refuses");
     }
 
     printf("\n%s\n", g_fail ? "MEMORY PROBE TESTS FAILED" : "MEMORY PROBE TESTS PASSED");

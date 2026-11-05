@@ -234,10 +234,10 @@ $(BIN)/test_prefix: tests/unit/test_prefix.c src/chat/k3_prefix.h | $(BIN)
 # The memory probe is one platform call per OS and nothing else; built the same way.
 $(BIN)/test_sysmem: tests/unit/test_sysmem.c src/cli/k3_sysmem.h | $(BIN)
 	$(CC) -O2 -std=gnu99 $(WARN) $(INCLUDES) -Isrc/cli $< -o $@
-# The cgroup walk inside that header, against a fake /proc + /sys tree the test builds
-# itself; header-only, so it links nothing from the engine either.
-$(BIN)/test_mem: tests/unit/test_mem.c src/cli/k3_sysmem.h | $(BIN)
-	$(CC) -O2 -std=gnu99 $(WARN) $(INCLUDES) -Isrc/cli $< -o $@
+# The fixture probe and its CLI admission callers; test_mem.c includes k3_run.c
+# to replace only the live probe and the chat allocator in this test binary.
+$(BIN)/test_mem: tests/unit/test_mem.c src/cli/k3_sysmem.h $(CLI_SRC) $(CHAT_SRC) $(ENGINE_OBJ) | $(BIN)
+	$(CC) $(CFLAGS) $(INCLUDES) -Isrc/cli $< src/cli/k3_state.c $(CHAT_SRC) $(ENGINE_OBJ) -o $@ $(LDFLAGS)
 
 # Allocates at REAL model widths (a ~1.8 GB KDA layer), so it needs the optimised build
 # rather than the portable C99 one the tokenizer and config tests use.
