@@ -2,7 +2,8 @@
  *
  * Companion to test_sysmem.c: that one checks the live probe returns a real number
  * on every platform; this one checks the Linux cgroup walk in k3_sysmem.h against
- * trees it builds itself, so it runs the same on every platform too.
+ * trees it builds itself, then exercises the CLI admission callers with that
+ * fixture probe, so it runs the same on every platform too.
  *
  * WHY THIS FILE EXISTS
  *   The admission check compares the memory plan against what the kernel says is
@@ -33,6 +34,7 @@
  * Allocation failure stops an admitted chat turn before it needs model weights. */
 static K3MemAvail admission_memory;
 static int fail_chat_alloc;
+static char admission_model[800];
 static double admission_probe(K3MemAvail *out)
 {
     *out = admission_memory;
@@ -117,7 +119,7 @@ static void tree(Tree *t, const char *work, const char *tag, int with_meminfo)
 /* Check the reason as well as the status: a missing checkpoint also exits nonzero.
  * Run the real chat caller with all allocations refused, so an unknown reading
  * reaches the buffer error while a known zero must stop earlier, naming KV. */
-static void admission_case(int chat, int automatic, int want_rc,
+static void admission_case(int mode, int want_rc,
                            const char *reason, const char *what)
 {
     FILE *log = tmpfile();
@@ -127,7 +129,7 @@ static void admission_case(int chat, int automatic, int want_rc,
         exit(1);
     }
     int rc;
-    if (chat) {
+    if (mode == 1) {
         K3ChatHistory history; k3_chat_history_init(&history);
         K3Cfg c; int fa[128]; real_cfg_hardcoded(&c, fa);
         Weights w; memset(&w, 0, sizeof w);
@@ -144,8 +146,15 @@ static void admission_case(int chat, int automatic, int want_rc,
                         "tests/fixtures/cfg/flat.json", "--ids", "1",
                         "--incremental", "--layers", "1", NULL};
         char *auto_args[] = {"k3", "fake", "--ids", "1", "--preset", "auto", NULL};
-        rc = automatic ? k3_cli_main((int)(sizeof auto_args / sizeof *auto_args) - 1, auto_args)
-                       : k3_cli_main((int)(sizeof args / sizeof *args) - 1, args);
+        char *plan_args[] = {"k3", admission_model, "--config",
+                             "tests/fixtures/cfg/flat.json", "--ids", "1",
+                             "--layers", "1", "--cache-gb", "0", NULL};
+        if (mode == 2)
+            rc = k3_cli_main((int)(sizeof auto_args / sizeof *auto_args) - 1, auto_args);
+        else if (mode == 3)
+            rc = k3_cli_main((int)(sizeof plan_args / sizeof *plan_args) - 1, plan_args);
+        else
+            rc = k3_cli_main((int)(sizeof args / sizeof *args) - 1, args);
     }
     fflush(stderr);
     dup2(saved, fileno(stderr)); close(saved);
@@ -155,6 +164,50 @@ static void admission_case(int chat, int automatic, int want_rc,
     detail[n] = 0; fclose(log);
     int ok = rc == want_rc && strstr(detail, reason) != NULL;
     ck(ok, what, ok ? NULL : detail);
+}
+
+/* One KDA/dense layer matching cfg/flat.json, with zero F32 payloads. It lets
+ * non-incremental runs reach the whole-plan guard without mocking the binder.
+ * Model-level tensors are deliberately absent: an admitted plan stops there. */
+static int plan_fixture(const char *work)
+{
+    static const struct { const char *name; int elements; } tensors[] = {
+        {"input_layernorm.weight", 128}, {"post_attention_layernorm.weight", 128},
+        {"self_attention_res_norm.weight", 128}, {"self_attention_res_proj.weight", 128},
+        {"mlp_res_norm.weight", 128}, {"mlp_res_proj.weight", 128},
+        {"self_attn.q_proj.weight", 8192}, {"self_attn.k_proj.weight", 8192},
+        {"self_attn.v_proj.weight", 8192}, {"self_attn.g_proj.weight", 8192},
+        {"self_attn.o_proj.weight", 8192},
+        {"self_attn.q_conv1d.weight", 256}, {"self_attn.k_conv1d.weight", 256},
+        {"self_attn.v_conv1d.weight", 256},
+        {"self_attn.f_a_proj.weight", 2048}, {"self_attn.f_b_proj.weight", 1024},
+        {"self_attn.b_proj.weight", 512}, {"self_attn.A_log", 16},
+        {"self_attn.dt_bias", 64}, {"self_attn.o_norm.weight", 16},
+        {"mlp.gate_proj.weight", 12288}, {"mlp.up_proj.weight", 12288},
+        {"mlp.down_proj.weight", 12288}
+    };
+    snprintf(admission_model, sizeof admission_model, "%s/plan-model", work);
+    mkdirs(admission_model);
+    char path[900]; snprintf(path, sizeof path, "%s/model.safetensors", admission_model);
+    FILE *f = fopen(path, "wb");
+    if (!f) return -1;
+    char header[8192]; size_t n = 0; int bytes = 0;
+    for (size_t i = 0; i < sizeof tensors / sizeof *tensors; i++) {
+        int end = bytes + tensors[i].elements * 4;
+        n += (size_t)snprintf(header + n, sizeof header - n,
+            "%s\"language_model.model.layers.0.%s\":{\"dtype\":\"F32\","
+            "\"shape\":[%d],\"data_offsets\":[%d,%d]}",
+            i ? "," : "{", tensors[i].name, tensors[i].elements, bytes, end);
+        bytes = end;
+    }
+    header[n++] = '}';
+    while (n % 8) header[n++] = ' ';
+    for (int i = 0; i < 8; i++) fputc((int)(((uint64_t)n >> (8 * i)) & 255), f);
+    fwrite(header, 1, n, f);
+    for (int i = 0; i < bytes; i++) fputc(0, f);
+    int bad = ferror(f);
+    if (fclose(f)) bad = 1;
+    return bad ? -1 : 0;
 }
 
 int main(int argc, char **argv)
@@ -323,9 +376,11 @@ int main(int argc, char **argv)
         int rc = k3_mem_available_at(t.meminfo, t.cgroup, t.sys, &admission_memory);
         ck(rc == 0 && admission_memory.known && !admission_memory.malformed
            && admission_memory.bytes == 0.0, "full cgroup: known zero headroom", NULL);
-        admission_case(0, 0, 2, "REFUSING: the KV cache", "known zero: startup refuses KV by name");
-        admission_case(1, 0, 1, "chat: KV cache", "known zero: chat refuses KV by name");
-        admission_case(0, 1, 2, "--preset auto", "known zero: auto still refuses");
+        ck(plan_fixture(work) == 0, "whole-plan model fixture written", NULL);
+        admission_case(0, 2, "REFUSING: the KV cache", "known zero: startup refuses KV by name");
+        admission_case(1, 1, "chat: KV cache", "known zero: chat refuses KV by name");
+        admission_case(2, 2, "--preset auto could not read", "known zero: auto still refuses");
+        admission_case(3, 1, "REFUSING TO START: this needs", "known zero: whole plan refuses");
     }
     /* (l) with neither host nor cgroup measurements, explicit budgets still pass
      * the KV guard and reach the unrelated missing-model / buffer diagnostics. */
@@ -334,9 +389,11 @@ int main(int argc, char **argv)
         int rc = k3_mem_available_at(t.meminfo, t.cgroup, t.sys, &admission_memory);
         ck(rc != 0 && !admission_memory.known && !admission_memory.malformed,
            "no sources: admission remains unknown", NULL);
-        admission_case(0, 0, 1, "layers are missing tensors", "unknown: startup skips KV check");
-        admission_case(1, 0, 1, "chat: buffer allocation failed", "unknown: chat skips KV check");
-        admission_case(0, 1, 2, "--preset auto", "unknown: auto still refuses");
+        admission_case(0, 1, "layers are missing tensors", "unknown: startup skips KV check");
+        admission_case(1, 1, "chat: buffer allocation failed", "unknown: chat skips KV check");
+        admission_case(2, 2, "--preset auto could not read", "unknown: auto still refuses");
+        admission_case(3, 1, "missing tensor language_model.model.embed_tokens.weight",
+                       "unknown: whole plan skips check");
     }
 
     printf("\n%s\n", g_fail ? "MEMORY PROBE TESTS FAILED" : "MEMORY PROBE TESTS PASSED");

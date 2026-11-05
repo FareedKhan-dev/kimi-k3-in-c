@@ -1,10 +1,10 @@
 /* k3_sysmem.h - how much memory this machine can actually hand out, on every platform
  * the engine builds on.
  *
- * Two refusals in k3_run.c compare the plan against this number: the KV cache check
- * and the whole-plan check before allocation. Both are guarded by "available > 0", so
- * a probe that returns 0 does not fail loudly, it silently turns both guards off, and
- * --preset auto refuses outright. Until this header the probe was /proc/meminfo behind
+ * The KV cache and whole-plan refusals in k3_run.c compare against this number when
+ * the probe's `known` flag is set: a measured zero refuses a positive plan, while an
+ * unknown measurement skips admission. --preset auto refuses either zero or unknown.
+ * Until this header the probe was /proc/meminfo behind
  * #ifdef _WIN32, which is exactly 0 on macOS.
  *
  *   Linux     MemAvailable, the kernel's own estimate of what can be handed out without
@@ -29,10 +29,10 @@
  *             commit an allocation while plenty of physical memory sits free, and the
  *             engine's arenas are committed up front.
  *
- * Both functions return 0 when the platform cannot say, which every caller already
- * treats as "unknown", not as "none". k3_mem_probe() is the same probe with the
- * breakdown attached, for the callers that must tell "unknown" from "fail closed" and
- * for the plan's `available` line. */
+ * Both probes return 0 when the platform cannot say and when no headroom remains.
+ * k3_mem_probe() attaches the breakdown so admission can distinguish a known zero
+ * from unknown and fail closed on malformed controls, and print the plan's
+ * `available` line. */
 #ifndef K3_SYSMEM_H
 #define K3_SYSMEM_H
 
@@ -357,9 +357,9 @@ static double k3_mem_probe(K3MemAvail *out)
 #endif
 }
 
-/* What the machine can hand out, as one number: 0 when unknown, and also 0 when a
- * cgroup control file is present but unreadable. Callers that must tell those two
- * apart (the admission refusals in k3_run.c) use k3_mem_probe() directly. */
+/* What the machine can hand out, as one number: 0 when unknown, when measured
+ * headroom is zero, or when a cgroup control file is present but unreadable.
+ * Admission refusals use k3_mem_probe() to distinguish these cases. */
 static inline double k3_mem_available_bytes(void)
 {
     K3MemAvail m;

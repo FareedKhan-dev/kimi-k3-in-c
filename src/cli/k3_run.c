@@ -435,8 +435,9 @@ static double peak_rss_bytes(void)
  * (tests/fixtures/gates/gates.txt:219, :229), admitted a plan the cgroup could not
  * hold, and was OOM-killed instead of refused. See k3_sysmem.h for the walk.
  *
- * Returns 0 if nothing could be read, which callers treat as "unknown, skip the
- * check" exactly as before. A control file that is present but cannot be trusted
+ * Returns 0 if nothing could be read, with known unset so callers skip the check
+ * exactly as before. A measured zero has known set and must still be checked.
+ * A control file that is present but cannot be trusted
  * is different: that fails CLOSED, so the caller sees 0 with *malformed set and
  * must refuse rather than skip. */
 static double mem_available_bytes(K3MemAvail *out)
@@ -731,7 +732,7 @@ static int chat_run(Tok *tok, const K3ChatTemplate *tmpl, K3ChatHistory *history
             K3MemAvail mp;
             const double avail = mem_available_bytes(&mp);
             if (mp.malformed) return 1;
-            if (avail > 0.0 && kv_need > avail * 0.9) {
+            if (mp.known && kv_need > avail * 0.9) {
                 char kb[32], ab[32];
                 human(kv_need, kb, sizeof kb); human(avail, ab, sizeof ab);
                 fprintf(stderr, "chat: KV cache for %d positions needs %s, but only %s is available; history was preserved\n", need, kb, ab);
@@ -1408,7 +1409,7 @@ int main(int argc, char **argv)
         human(avail, ab, sizeof ab);
         printf("  KV cache : %s for %d positions (%.2f MB/position)\n",
                kb, np + gen + 1, K3_KV_BYTES_PER_POS / 1e6);
-        if (avail > 0.0 && kv_need > avail * 0.9) {
+        if (mp.known && kv_need > avail * 0.9) {
             fprintf(stderr,
                 "\nREFUSING: the KV cache for %d positions needs %s but only %s is\n"
                 "available. This is a MEMORY limit, not an engine ceiling: MLA caches\n"
@@ -1509,7 +1510,7 @@ int main(int argc, char **argv)
                "  TOTAL            %s\n",
                trunk_dir ? "(STREAMED)" : "(resident)", b1, b2,
                ultra ? "(STREAMED)" : "(resident)", b3, b4, b5, b7, b6);
-        if (have > 0.0) {
+        if (mp.known) {
             human(have, b1, sizeof b1);
             mem_available_line(&mp, bl, sizeof bl);
             printf("  available        %s\n", bl);
