@@ -461,6 +461,53 @@ int main(int argc, char **argv)
                what, d);
         }
 
+        /* Dirty and writeback pages sit on the file lists but are not room until they
+         * are written: of 14 GiB on the lists, 2 GiB dirty and 1 GiB under writeback
+         * leave 11 GiB of credit. v1 spells them total_dirty / total_writeback. */
+        {
+            static const struct {
+                const char *tag, *dirty, *writeback, *other, *again;
+                double room;
+            } unwritten[] = {
+                {"dirty and writeback are not room", "2147483648", "1073741824", NULL, NULL, 15},
+                {"dirty only", "2147483648", NULL, NULL, NULL, 16},
+                {"writeback only", NULL, "1073741824", NULL, NULL, 17},
+                {"other hierarchy's dirty is ignored", NULL, NULL, "2147483648", NULL, 18},
+                {"dirty above the cache: no credit", "17179869184", NULL, NULL, NULL, 4},
+                {"duplicate dirty", "1", NULL, NULL, "2", 4},
+                {"malformed dirty", "nope", NULL, NULL, NULL, 4},
+            };
+            const char *dk = v == 1 ? "total_dirty" : "file_dirty";
+            const char *wk = v == 1 ? "total_writeback" : "file_writeback";
+            const char *other_key = v == 1 ? "file_dirty" : "total_dirty";
+            for (size_t i = 0; i < sizeof unwritten / sizeof unwritten[0]; i++) {
+                char tag[80]; snprintf(tag, sizeof tag, "k-v%d-u%zu", v, i);
+                Tree t; tree(&t, work, tag, 1);
+                put(t.root, "cgroup", v == 1 ? "4:memory:/\n" : "0::/\n");
+                put(t.sys, limit, "25769803776\n");
+                put(t.sys, usage, "21474836480\n");
+                char stat[1024]; int n;
+                n = snprintf(stat, sizeof stat, "%sinactive_file 8589934592\n%sactive_file 6442450944\n",
+                             prefix, prefix);
+                if (unwritten[i].dirty)
+                    n += snprintf(stat + n, sizeof stat - (size_t)n, "%s %s\n", dk, unwritten[i].dirty);
+                if (unwritten[i].writeback)
+                    n += snprintf(stat + n, sizeof stat - (size_t)n, "%s %s\n", wk, unwritten[i].writeback);
+                if (unwritten[i].other)
+                    n += snprintf(stat + n, sizeof stat - (size_t)n, "%s %s\n", other_key, unwritten[i].other);
+                if (unwritten[i].again)
+                    n += snprintf(stat + n, sizeof stat - (size_t)n, "%s %s\n", dk, unwritten[i].again);
+                put(t.sys, "memory.stat", stat);
+                K3MemAvail m;
+                int rc = k3_mem_available_at(t.meminfo, t.cgroup, t.sys, &m);
+                char d[2048], what[128];
+                snprintf(what, sizeof what, "v%d %s", v, unwritten[i].tag);
+                snprintf(d, sizeof d, "room %.0f GiB, expected %.0f", m.bytes / gib, unwritten[i].room);
+                ck(rc == 0 && m.known && !m.malformed && m.bytes == unwritten[i].room * gib
+                   && m.cgroup_usage == (24 - unwritten[i].room) * gib, what, d);
+            }
+        }
+
         /* Each ancestor uses its own cache; the binding path may change. */
         Tree t; tree(&t, work, v == 1 ? "k-v1-nested" : "k-v2-nested", 1);
         put(t.root, "cgroup", v == 1 ? "4:memory:/parent/leaf\n" : "0::/parent/leaf\n");

@@ -15,7 +15,8 @@
  *             `available 65.56 GB` (tests/fixtures/gates/gates.txt:219, :229) and
  *             admitted a run the kernel then OOM-killed. The figure is
  *             min(MemAvailable, tightest cgroup ancestor's limit - working set),
- *             where working set is usage minus active/inactive file cache. v2 is
+ *             where working set is usage minus the active/inactive file cache that
+ *             is neither dirty nor under writeback. v2 is
  *             authoritative where its memory controller is visible; v1 only when
  *             it is not. A limit or usage file that is PRESENT but garbled or unreadable
  *             fails CLOSED (k3_mem_probe reports malformed, and the bytes figure
@@ -138,14 +139,18 @@ static int k3_mem_file_exists(const char *path)
 /* Optional reclaimable file cache. v1 needs the hierarchical total_* counters to
  * match usage_in_bytes. Missing counters contribute zero; an unreadable or malformed
  * stat contributes nothing at all, including any counters read before the error.
- * Do not use `file`: that includes tmpfs/shmem, which is not reclaimable this way. */
+ * Do not use `file`: that includes tmpfs/shmem, which is not reclaimable this way.
+ * Dirty and writeback pages are on the file lists too, but they cannot be dropped
+ * until they are written and a cgroup at its limit is OOM-killed before that
+ * finishes, so file_dirty + file_writeback (v1 total_dirty + total_writeback) are
+ * taken back out of the credit. */
 static double k3_mem_file_cache(const char *dir, int v1)
 {
     char path[600];
     snprintf(path, sizeof path, "%s/memory.stat", dir);
     FILE *f = fopen(path, "r");
     if (!f) return 0.0;
-    double cache = 0.0;
+    double cache = 0.0, unwritten = 0.0;
     unsigned seen = 0;
     for (;;) {
         char line[256], key[64], value[64], extra;
@@ -166,15 +171,18 @@ static double k3_mem_file_cache(const char *dir, int v1)
         unsigned bit = 0;
         if (!strcmp(key, v1 ? "total_inactive_file" : "inactive_file")) bit = 1;
         if (!strcmp(key, v1 ? "total_active_file" : "active_file")) bit = 2;
+        if (!strcmp(key, v1 ? "total_dirty" : "file_dirty")) bit = 4;
+        if (!strcmp(key, v1 ? "total_writeback" : "file_writeback")) bit = 8;
         if (bit) {
             if (seen & bit) goto invalid;
             seen |= bit;
-            cache += (double)u;  /* add as doubles so two u64 counters cannot wrap */
+            /* add as doubles so two u64 counters cannot wrap */
+            if (bit <= 2) cache += (double)u; else unwritten += (double)u;
         }
     }
     if (ferror(f)) goto invalid;
     fclose(f);
-    return cache;
+    return cache > unwritten ? cache - unwritten : 0.0;
 
 invalid:
     fclose(f);
