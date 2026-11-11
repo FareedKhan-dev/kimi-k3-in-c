@@ -114,4 +114,26 @@ int  k3_cache_dump_hist(const K3Cache *c, const char *path);
  * request order. tools/sim_cache.py replays it at any capacity. */
 int  k3_cache_dump_trace(const K3Cache *c, const char *path);
 
+/* Whether a window read as nchunk chunks of `chunk` bytes (the last one shorter, to
+ * `len` total) holds its payload, which ends `need` bytes into the window. got[k] is
+ * what chunk k returned.
+ *
+ * Summing got[] is not the same test. The window is the payload widened to whole
+ * aligned blocks, so it carries up to K3_ST_ALIGN - 1 bytes of tail slack, and a sum
+ * cannot tell "the last chunk ended at EOF in that slack" from "a middle chunk came
+ * back short": a middle chunk losing no more than the slack still sums past `need`,
+ * and the expert is published, and then served as a hit, with a hole in it. Only the
+ * last chunk may be short, and only past `need`. */
+static inline int k3_chunks_cover(const int64_t *got, int nchunk, int64_t chunk,
+                                  int64_t len, int64_t need)
+{
+    for (int k = 0; k < nchunk; k++) {
+        const int64_t base = (int64_t)k * chunk;
+        const int64_t want = (k + 1 < nchunk) ? chunk
+                           : (need - base > 0 ? need - base : 0);
+        if (base >= len || got[k] < want) return 0;
+    }
+    return nchunk > 0;
+}
+
 #endif /* K3_CACHE_H */

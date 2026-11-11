@@ -305,12 +305,12 @@ static int cache_getmany(K3ExpertSrc *self, int layer, const int *ids, int n)
 
     for (int i = 0; i < nw; i++) {
         if (!w[i].r.contiguous || w[i].nchunk == 1) { w[i].got = cgot[w[i].cbase]; continue; }
-        int64_t tot = 0;
-        for (int ci = 0; ci < w[i].nchunk; ci++) tot += cgot[w[i].cbase + ci];
         /* Chunks return window bytes from lo. Only the final chunk of a shard can be
-         * short at EOF, so the payload is covered exactly when tot reaches pad+nbytes --
-         * the same test k3_st_read_aligned applies to a whole-expert read. */
-        w[i].got = (tot >= w[i].pad + w[i].r.nbytes) ? w[i].r.nbytes : 0;
+         * short at EOF, and only past pad+nbytes -- the same test k3_st_read_aligned
+         * applies to a whole-expert read. A total cannot express that; see
+         * k3_chunks_cover. */
+        w[i].got = k3_chunks_cover(cgot + w[i].cbase, w[i].nchunk, w[i].chunk, w[i].len,
+                                   w[i].pad + w[i].r.nbytes) ? w[i].r.nbytes : 0;
     }
 
     /* ---- phase 3: publish only what actually arrived ---- */
