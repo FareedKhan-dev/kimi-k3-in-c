@@ -241,6 +241,13 @@ add_test(NAME tokenizer
                  -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/run_tok_test.cmake)
 set_tests_properties(tokenizer PROPERTIES SKIP_REGULAR_EXPRESSION "SKIPPED:")
 
+# The loader half of the tokenizer, which needs no released vocabulary and so runs here.
+add_test(NAME tokenizer_loader
+         COMMAND ${CMAKE_COMMAND}
+                 -DTEST_TOK=$<TARGET_FILE:test_tok>
+                 -DFIXTURES=${FIX}
+                 -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/test_tok_loader.cmake)
+
 add_executable(bench_kernels benchmarks/bench_kernels.c)
 target_link_libraries(bench_kernels PRIVATE k3)
 

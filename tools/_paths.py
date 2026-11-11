@@ -38,6 +38,7 @@ FIXTURES = os.path.join(ROOT, "tests", "fixtures")
 FIX_OPS = os.path.join(FIXTURES, "ops")
 FIX_CACHE = os.path.join(FIXTURES, "cache")
 FIX_ST = os.path.join(FIXTURES, "st")
+FIX_TOK = os.path.join(FIXTURES, "tok")
 FIX_GOLDEN = os.path.join(FIXTURES, "golden")
 
 REF_K3_JSON = os.path.join(FIXTURES, "ref_k3.json")

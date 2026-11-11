@@ -12,6 +12,7 @@ Total is about 12 MB.
 | `ops/MANIFEST.json` | none | `test_ops` | same; lists fixtures and tolerances |
 | `cache/` | ~200 KB | `test_cache` | `tools/make_cache_fixture.py` |
 | `st/` | ~50 KB | `test_st` | `tools/make_st_fixture.py` |
+| `tok/` | ~25 KB | `test_tok` (tokenizer loader) | `tools/make_tok_fixture.py` |
 | `ref_k3.json` | 6 KB | `k3_model` | `tools/make_k3_oracle.py` |
 | `tiny_k3.bin`, `tiny_k3.json` | 9 MB | `k3_model` | same |
 | `mxfp4.json` | 2.9 MB | `test_ops`, `tools/verify_expert.py` | `tools/emit_fixtures.py` |
@@ -30,6 +31,7 @@ python tools/emit_fixtures.py        # ops/ and mxfp4.json
 python tools/make_k3_oracle.py       # ref_k3.json, tiny_k3.*
 python tools/make_cache_fixture.py   # cache/
 python tools/make_st_fixture.py      # st/
+python tools/make_tok_fixture.py     # tok/ (stdlib only)
 ```
 
 `expert_trace.bin` cannot be regenerated without the real checkpoint; capture a new one
@@ -57,6 +59,8 @@ against a wrong implementation:
 - **`cache/`** content is derived from the expert index, so slot aliasing, returning
   expert *a*'s bytes for expert *b*, is visible immediately instead of looking like
   plausible noise.
+- **`tok/`** corrupt vocabularies are each valid line by line. `truncated/` is a file cut
+  at a line boundary, which only the gap before the first added token reveals.
 - **`mxfp4.json`** holds released checkpoint bytes, so the nibble order and the E8M0 scale
   exponent are checked against the released format rather than against this project's
   own assumptions about it.
