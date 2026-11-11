@@ -39,14 +39,24 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _paths import FIX_CACHE
 
-ROWS, PCOLS, GROUP = 8, 64, 32          # 64 packed bytes = 128 e2m1 values per row
-SCOLS = PCOLS * 2 // GROUP              # one ue8m0 scale per 32 logical columns
+# A real expert's geometry, scaled down: w1 and w3 are [INTER][LATENT], w2 is
+# [LATENT][INTER], the shapes k3_expert_check_shape holds every expert to. test_cache
+# sets the same two numbers in its config. 3,264 bytes per expert, not a multiple of
+# 4096, so O_DIRECT slot alignment is gated rather than coincidental.
+LATENT, INTER, GROUP = 64, 32, 32
+SHAPES = {0: (INTER, LATENT), 1: (LATENT, INTER), 2: (INTER, LATENT)}   # w1, w2, w3
+
+
+def dims(which: int, packed: bool) -> tuple[int, int]:
+    rows, logical = SHAPES[which]
+    return rows, (logical // 2 if packed else logical // GROUP)
 FMT = "language_model.model.layers.%d.block_sparse_moe.experts.%d.%s.%s"
 
 
 def expert_bytes(e: int, which: int, packed: bool) -> np.ndarray:
     """Deterministic and expert-specific, so a mix-up cannot look like valid data."""
-    n = ROWS * (PCOLS if packed else SCOLS)
+    rows, cols = dims(which, packed)
+    n = rows * cols
     base = (e * 977 + which * 31 + (0 if packed else 7)) & 0xFF
     return ((np.arange(n, dtype=np.uint32) + base) % 251).astype(np.uint8)
 
@@ -64,7 +74,7 @@ def main():
         for wi, wname in enumerate(("w1", "w2", "w3")):
             for packed in (True, False):
                 a = expert_bytes(e, wi, packed)
-                shape = [ROWS, PCOLS if packed else SCOLS]
+                shape = list(dims(wi, packed))
                 name = FMT % (0, e, wname, "weight_packed" if packed else "weight_scale")
                 tensors[name] = {"dtype": "U8", "shape": shape,
                                  "data_offsets": [off, off + a.nbytes]}
@@ -80,7 +90,7 @@ def main():
         f.write(hdr)
         f.write(bytes(blob))
 
-    per = ROWS * (PCOLS + SCOLS) * 3
+    per = sum(r * c for w in range(3) for r, c in (dims(w, True), dims(w, False)))
     print("wrote %s" % path)
     print("  %d experts, %d tensors, %d bytes each, %d bytes total"
           % (n, len(tensors), per, os.path.getsize(path)))

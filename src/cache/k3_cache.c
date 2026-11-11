@@ -73,6 +73,7 @@ static int admit(K3Cache *c, int layer, int expert)
 
     K3ExpertRef r;
     if (k3_expert_ref(c->st, layer, expert, &r) != 0) return -1;
+    if (k3_expert_check_shape(&r, c->latent, c->moe_inter) != 0) return -1;
     if (r.nbytes > c->slot_bytes) {
         fprintf(stderr, "k3_cache: L%d expert %d is %lld bytes, slot holds %lld\n",
                 layer, expert, (long long)r.nbytes, (long long)c->slot_bytes);
@@ -194,6 +195,8 @@ static int cache_getmany(K3ExpertSrc *self, int layer, const int *ids, int n)
 
         K3ExpertRef r;
         if (k3_expert_ref(c->st, layer, e, &r) != 0) continue;
+        /* Skipped, not refused: the serial get that follows refuses it loudly. */
+        if (k3_expert_check_shape(&r, c->latent, c->moe_inter) != 0) continue;
         if (r.nbytes > c->slot_bytes) continue;
 
         const int slot = pick_victim(c);
@@ -395,9 +398,13 @@ int k3_cache_init(K3Cache *c, const K3St *st, const K3Cfg *cfg, int64_t budget_b
     c->st = st;
     c->n_layers = cfg->n_layers;
     c->n_experts = cfg->n_experts;
+    c->latent = cfg->latent;
+    c->moe_inter = cfg->moe_inter;
 
     /* Size a slot from the checkpoint rather than from arithmetic: find any expert and
-     * ask how many bytes it actually occupies. */
+     * ask how many bytes it actually occupies. The probe is shape-checked first: a slot
+     * sized from a smaller expert than the kernels index would have every one of them
+     * read past its slot, and the last one past the arena. */
     K3ExpertRef probe;
     int found = 0;
     for (int L = 0; L < cfg->n_layers && !found; L++) {
@@ -405,6 +412,7 @@ int k3_cache_init(K3Cache *c, const K3St *st, const K3Cfg *cfg, int64_t budget_b
         if (k3_expert_ref(st, L, 0, &probe) == 0) found = 1;
     }
     if (!found) { fprintf(stderr, "k3_cache: no routed experts in this shard set\n"); return -1; }
+    if (k3_expert_check_shape(&probe, c->latent, c->moe_inter) != 0) return -1;
     /* Room for an O_DIRECT read widened outward to 4096 boundaries at both ends. */
     /* Round the SLOT STRIDE up to the O_DIRECT alignment, not just the arena base.
      *

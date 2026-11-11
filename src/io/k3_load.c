@@ -12,6 +12,23 @@
 
 int64_t k3_qmat_numel(const K3QMat *m) { return (int64_t)m->rows * m->pcols * 2; }
 
+int k3_expert_check_shape(const K3ExpertRef *r, int latent, int moe_inter)
+{
+    static const char *W[3] = { "w1", "w2", "w3" };
+    for (int i = 0; i < 3; i++) {
+        const int rows = (i == 1) ? latent : moe_inter;
+        const int cols = (i == 1) ? moe_inter : latent;
+        if (r->m[i].rows != rows || (int64_t)r->m[i].pcols * 2 != cols) {
+            fprintf(stderr, "k3_load: L%d expert %d %s is [%d x %lld], the config says "
+                            "[%d x %d] (latent %d, moe_inter %d)\n",
+                    r->layer, r->expert, W[i], r->m[i].rows, (long long)r->m[i].pcols * 2,
+                    rows, cols, latent, moe_inter);
+            return -1;
+        }
+    }
+    return 0;
+}
+
 int k3_expert_ref(const K3St *s, int layer, int expert, K3ExpertRef *r)
 {
     static const char *W[3] = { "w1", "w2", "w3" };

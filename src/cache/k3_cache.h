@@ -49,6 +49,7 @@ typedef struct {
 
     const K3St  *st;
     int          n_layers, n_experts;
+    int          latent, moe_inter;   /* the expert shape every admitted expert must have */
 
     unsigned char *arena;         /* nslot * slot_bytes, page aligned          */
     int64_t      slot_bytes;
