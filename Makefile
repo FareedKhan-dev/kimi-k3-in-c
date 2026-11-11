@@ -207,7 +207,7 @@ $(BIN)/test_st_faults: tests/unit/test_st_faults.c $(BUILD)/src/io/k3_st.o | $(B
 
 # The tokenizer and config reader are portable C99 with no OpenMP and no platform calls,
 # so they build and are verifiable on any machine, including one with no checkpoint.
-$(BIN)/test_tok: tests/unit/test_tok.c | $(BIN)
+$(BIN)/test_tok: tests/unit/test_tok.c src/tokenizer/k3_tok.h third_party/tok.h | $(BIN)
 	$(CC) -O2 -std=c99 $(WARN) -Wno-unused-function $(INCLUDES) $< -o $@
 
 $(BIN)/test_chat: tests/unit/test_chat.c src/chat/k3_chat.c src/chat/k3_sampler.c | $(BIN)
@@ -323,6 +323,21 @@ test: $(CLI_BIN) $(TEST_BINS)
 	  for f in no_layermap bad_layer_index bad_topk; do \
 	      ./$(BIN)/test_cfg reject $(FIXTURES)/cfg/$$f.json || exit 1; \
 	  done
+	@echo "== tokenizer loader =="; \
+	  out=$$(./$(BIN)/test_tok $(FIXTURES)/tok/good encode "hello hello" 2>/dev/null); \
+	  test "$$out" = "259,258,32,259,258" || { \
+	      echo "  good vocabulary encoded 'hello hello' to [$$out]"; exit 1; }; \
+	  for c in "dup_rank:appears twice" "missing_rank:rank 100 is missing" \
+	           "junk_rank:bad rank field" "dup_bytes:encode the same bytes" \
+	           "added_collides:already taken by a rank" "truncated:looks truncated"; do \
+	      d=$${c%%:*}; why=$${c#*:}; \
+	      if err=$$(./$(BIN)/test_tok $(FIXTURES)/tok/$$d encode x 2>&1 >/dev/null); then \
+	          echo "  $$d: the corrupt vocabulary loaded"; exit 1; fi; \
+	      case "$$err" in *"$$why"*) ;; \
+	          *) echo "  $$d: refused, but not because of '$$why':"; \
+	             echo "      $$err"; exit 1;; \
+	      esac; \
+	  done; echo "  rank BPE over byte-level keys; 6 corrupt vocabularies refused, each for the right reason"
 	@echo "== tokenizer =="; \
 	  if [ -f "$(TOK_FILES)/tiktoken.model" ]; then \
 	      ./$(BIN)/test_tok "$(TOK_FILES)" roundtrip src/core/k3_ops.c; \
