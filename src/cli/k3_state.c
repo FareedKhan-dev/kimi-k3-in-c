@@ -19,6 +19,22 @@ void k3_state_fp(const K3Cfg *c, int32_t *fp)
     fp[9] = c->v_head;      fp[10] = c->n_experts; fp[11] = c->topk;
 }
 
+void k3_state_geom(const K3Cfg *c, int64_t *kper, int64_t *kvpp, int64_t *ropepp)
+{
+    const int64_t P = (int64_t)c->kda_heads * c->kda_head_dim;
+    *kper   = P * c->kda_head_dim + 3 * P * (c->conv_k - 1);
+    *kvpp   = (int64_t)c->n_heads * (c->qk_nope + c->v_head);
+    *ropepp = c->qk_rope;
+}
+
+/* The header as it is hashed: with the hash field itself zeroed. */
+static uint64_t hash_hdr(const K3StateHdr *hd)
+{
+    K3StateHdr z = *hd;
+    z.payload_hash = 0;
+    return k3_state_hash(K3_STATE_HASH_INIT, &z, sizeof z);
+}
+
 /* FNV-1a folded eight bytes at a time. Each step is xor with the next word then a
  * multiply by an odd constant, and multiplying by an odd number is a bijection mod
  * 2^64, so a change to any single word always changes the running value, and every
@@ -87,6 +103,26 @@ int k3_state_load(const char *path, const K3Cfg *c, const K3StateHdr *hd,
                 path, hd->n_bound, hd->n_mla, n_bound, n_mla);
         return -1;
     }
+    /* The reads below are sized and strided by these header fields, into buffers the
+     * caller sized from its own config. They are checked here, before any read, because
+     * the hash is only known after the reads: a kper one too large overruns ks first and
+     * is caught second. */
+    int64_t kper, kvpp, ropepp;
+    k3_state_geom(c, &kper, &kvpp, &ropepp);
+    if (hd->kper != kper || hd->kvpp != kvpp || hd->ropepp != ropepp) {
+        fprintf(stderr, "REFUSING: %s lays out %lld/%lld/%lld state/KV/rope floats, this "
+                        "config implies %lld/%lld/%lld\n", path, (long long)hd->kper,
+                (long long)hd->kvpp, (long long)hd->ropepp, (long long)kper,
+                (long long)kvpp, (long long)ropepp);
+        return -1;
+    }
+    /* nseq sizes the caller's seq buffer (prior = nseq), so a negative one shrinks that
+     * buffer while (size_t)nseq turns the read below into an unbounded one. */
+    if (hd->nseq < 0 || hd->cached < 0 || hd->cached > hd->nseq) {
+        fprintf(stderr, "REFUSING: %s holds %d token ids for %d cached positions\n",
+                path, hd->nseq, hd->cached);
+        return -1;
+    }
     if (hd->cached > kv_cap) {
         fprintf(stderr, "REFUSING: %s holds %d positions, this run's KV cache is %d.\n"
                         "  Raise --gen or shorten the prompt.\n", path, hd->cached, kv_cap);
@@ -97,7 +133,7 @@ int k3_state_load(const char *path, const K3Cfg *c, const K3StateHdr *hd,
     if (fseek(f, (long)sizeof *hd, SEEK_SET) != 0) { fclose(f); return -1; }
 
     int rc = 0;
-    uint64_t h = K3_STATE_HASH_INIT;
+    uint64_t h = hash_hdr(hd);
     if (hread(seq, sizeof(int), (size_t)hd->nseq, f, &h) != (size_t)hd->nseq) rc = -1;
     if (!rc && hread(ks, sizeof(float), (size_t)hd->kper * n_bound, f, &h)
                != (size_t)hd->kper * (size_t)n_bound) rc = -1;
@@ -113,8 +149,13 @@ int k3_state_load(const char *path, const K3Cfg *c, const K3StateHdr *hd,
         const size_t n = (size_t)hd->cached * hd->ropepp;
         if (hread(dst, sizeof(float), n, f, &h) != n) rc = -1;
     }
+    const int trailing = !rc && fgetc(f) != EOF;
     fclose(f);
     if (rc) { fprintf(stderr, "%s is truncated\n", path); return rc; }
+    if (trailing) {
+        fprintf(stderr, "REFUSING: %s is longer than its header describes\n", path);
+        return -1;
+    }
     /* Every read came back full, so the file has the right SHAPE. This is the check
      * that sees a wrong BYTE: a flipped bit in a recurrent matrix restores cleanly and
      * decodes fluently, and nothing after this point can tell. */
@@ -186,7 +227,7 @@ int k3_state_save(const char *path, const K3Cfg *c, const int *seq, int nseq,
      * hash still zero and is rewritten in place at the end. The file is still the temp
      * file at that point; nothing observes the intermediate header. */
     int rc = 0;
-    uint64_t h = K3_STATE_HASH_INIT;
+    uint64_t h = hash_hdr(&hd);
     if (fwrite(&hd, sizeof hd, 1, f) != 1) rc = -1;
     if (!rc && hwrite(seq, sizeof(int), (size_t)nseq, f, &h) != (size_t)nseq) rc = -1;
     if (!rc && hwrite(ks, sizeof(float), (size_t)kper * n_bound, f, &h)

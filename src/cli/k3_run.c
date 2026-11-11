@@ -461,8 +461,9 @@ static int forward(Weights *w, const K3Cfg *c, K3Cache *cache, const int *ids, i
 {
     const int E = c->hidden;
     const int maxb = c->n_layers / c->attn_res_block + 2;
-    const int P = c->kda_heads * c->kda_head_dim;
-    const size_t kper = (size_t)P * c->kda_head_dim + (size_t)3 * P * (c->conv_k - 1);
+    int64_t kper64, kvpp_, ropepp_;
+    k3_state_geom(c, &kper64, &kvpp_, &ropepp_);
+    const size_t kper = (size_t)kper64;
 
     for (int t = 0; t < T; t++) {
         if (w->ultra) {
@@ -1554,8 +1555,9 @@ int main(int argc, char **argv)
     int Tmax = prior + np + gen + 1;
     const int E = c.hidden;
     const int maxb = c.n_layers / c.attn_res_block + 2;
-    const int P = c.kda_heads * c.kda_head_dim;
-    const size_t kper = (size_t)P * c.kda_head_dim + (size_t)3 * P * (c.conv_k - 1);
+    int64_t kper64, kvpp, ropepp;
+    k3_state_geom(&c, &kper64, &kvpp, &ropepp);   /* the layout --load-state checks */
+    const size_t kper = (size_t)kper64;
 
     /* The model-level aggregator lays out fold[E] followed by (nb+1) source rows of E
      * inside scratch, and nb reaches n_layers/attn_res_block = 8 at full depth. So
@@ -1974,8 +1976,6 @@ int main(int argc, char **argv)
             fprintf(stderr, "--save-state needs --incremental; nothing written\n");
         } else {
             const double tsv = now_s();
-            const int64_t kvpp   = (int64_t)c.n_heads * (c.qk_nope + c.v_head);
-            const int64_t ropepp = (int64_t)c.qk_rope;
             if (k3_state_save(save_state, &c, seq, T, ks, w.kvc, w.ropec,
                               w.n_bound, w.n_mla, w.kv_cap, w.cached,
                               (int64_t)kper, kvpp, ropepp) == 0) {
