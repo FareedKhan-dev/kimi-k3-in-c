@@ -69,4 +69,11 @@ void k3_expert_dequant(const K3ExpertRef *r, const unsigned char *buf,
 /* Elements in each dequantised matrix, for sizing the destination buffers. */
 int64_t k3_qmat_numel(const K3QMat *m);
 
+/* Is this expert the shape the config says experts are? w1 and w3 must be
+ * [moe_inter][latent], w2 [latent][moe_inter]. k3_expert_ref checks an expert only
+ * against itself; the MoE kernels index it with the config's latent and moe_inter, so
+ * a self-consistent expert of another shape is multiplied past its own bytes. Returns
+ * 0, or -1 after printing why. */
+int k3_expert_check_shape(const K3ExpertRef *r, int latent, int moe_inter);
+
 #endif /* K3_LOAD_H */
