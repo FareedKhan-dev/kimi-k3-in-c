@@ -282,6 +282,17 @@ test: $(CLI_BIN) $(TEST_BINS)
 	             echo "  asserting only the exit code would pass on the loader's error"; exit 1;; \
 	      esac; \
 	  done; echo "  6 malformed numerics refused, each for the right reason"
+	@echo "== prompt length contract =="; \
+	  case "$$(uname -s)" in MINGW*|MSYS*) \
+	      echo "  NOT RUN: 32769 ids do not fit a Windows command line (32767 chars)";; \
+	  *) ids=$$(awk 'BEGIN { for (i = 0; i < 32769; i++) printf "%s1", (i ? "," : "") }'); \
+	     out=$$(./$(CLI_BIN) $(FIXTURES)/st --config $(FIXTURES)/cfg/flat.json --ids "$$ids" --gen 1 2>&1); rc=$$?; \
+	     test $$rc -eq 2 || { echo "  32769 ids returned $$rc, expected 2"; exit 1; }; \
+	     case "$$out" in *"exceeds the 32768-id ceiling"*) ;; \
+	         *) echo "  32769 ids were not refused for their length:"; \
+	            echo "$$out" | tail -3; exit 1;; \
+	     esac; echo "  a 32769-id prompt refused, not truncated to 32768";; \
+	  esac
 	@echo "== partial download contract =="; \
 	  if ! command -v $(PYTHON) >/dev/null 2>&1; then \
 	      echo "  NOT RUN: no $(PYTHON) on PATH. tools/layers_to_shards.py backs"; \
