@@ -94,6 +94,25 @@ int main(int argc, char **argv)
     }
     printf("streaming expert cache, %d tensors from %d shard(s)\n\n", st.nt, st.nshard);
 
+    {   /* Split-read coverage. A 3-chunk window of 12288 bytes whose payload ends 1000
+         * bytes short of it: the sum of a short middle chunk still clears the payload,
+         * which is how an expert with a hole in it used to be published. A read cannot
+         * be made to come back short on demand here, so the decision is tested alone. */
+        const int64_t CH = 4096, LEN = 3 * CH, NEED = LEN - 1000;
+        const int64_t full[3] = { CH, CH, CH };
+        const int64_t eof[3]  = { CH, CH, CH - 1000 };
+        const int64_t hole[3] = { CH, CH - 512, CH };
+        const int64_t first[3] = { CH - 1, CH, CH };
+        const int64_t last[3] = { CH, CH, CH - 1001 };
+        ck(k3_chunks_cover(full, 3, CH, LEN, NEED), "split read: full window covers", NULL);
+        ck(k3_chunks_cover(eof, 3, CH, LEN, NEED), "split read: short at EOF covers", NULL);
+        ck(!k3_chunks_cover(hole, 3, CH, LEN, NEED), "split read: short middle refused",
+           "sums past the payload");
+        ck(!k3_chunks_cover(first, 3, CH, LEN, NEED), "split read: short first refused", NULL);
+        ck(!k3_chunks_cover(last, 3, CH, LEN, NEED), "split read: short of payload refused",
+           NULL);
+    }
+
     K3Cfg c; memset(&c, 0, sizeof c);
     c.n_layers = 1; c.n_experts = NE; c.topk = 4;
 
