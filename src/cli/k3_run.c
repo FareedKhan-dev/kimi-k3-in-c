@@ -1258,8 +1258,10 @@ int main(int argc, char **argv)
     } else {
         /* Heap, not stack. This was `int prompt[4096]` and it was the reason the engine
          * refused prompts longer than 4096 ids -- a stack-array size, not a model or
-         * memory limit. */
-        prompt = (int *)malloc((size_t)K3_MAX_PROMPT * sizeof(int));
+         * memory limit. One id of slack, as in chat_render_ids: both readers below
+         * stop at their max, so a buffer of exactly K3_MAX_PROMPT can never hold the id
+         * that proves the prompt was too long, and the tail was dropped silently. */
+        prompt = (int *)malloc((size_t)(K3_MAX_PROMPT + 1) * sizeof(int));
         if (!prompt) { fprintf(stderr, "OOM allocating prompt buffer\n"); return 2; }
         if (prompt_text || prompt_file) {
             if (!tok_dir) {
@@ -1279,11 +1281,11 @@ int main(int argc, char **argv)
                 if (!ptext) { fprintf(stderr, "OOM on prompt\n"); return 2; }
                 memcpy(ptext, prompt_text, (size_t)plen + 1);
             }
-            np = tok_encode(&tok, ptext, (int)plen, prompt, K3_MAX_PROMPT);
+            np = tok_encode(&tok, ptext, (int)plen, prompt, K3_MAX_PROMPT + 1);
             free(ptext);
             printf("  tokenized: %ld bytes -> %d ids\n", plen, np);
         } else {
-            for (const char *p = ids_s; *p && np < K3_MAX_PROMPT; ) {
+            for (const char *p = ids_s; *p && np <= K3_MAX_PROMPT; ) {
                 /* strtol with no endptr check spins on garbage: "abc" never advances
                  * p, so the loop makes no progress and, because id 0 is exactly what
                  * a failed strtol call returns, silently fills the prompt with zeros
