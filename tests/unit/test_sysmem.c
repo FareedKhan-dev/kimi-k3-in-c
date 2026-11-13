@@ -33,7 +33,8 @@ static void ck(int ok, const char *what, const char *detail)
 
 int main(void)
 {
-    const double avail = k3_mem_available_bytes();
+    K3MemAvail m;
+    const double avail = k3_mem_probe(&m);
     const double total = k3_mem_total_bytes();
     char d[96];
 
@@ -49,9 +50,12 @@ int main(void)
 
 #if !defined(_WIN32) && !defined(__APPLE__)
     {
-        /* Linux: the probe must agree with an independent read of the same source.
-         * Memory moves between two reads, so the bound is loose, but a wrong field or
-         * a wrong unit is off by far more than this. */
+        /* Linux: the probe's host term must agree with an independent read of the same
+         * source. Memory moves between two reads, so the bound is loose, but a wrong
+         * field or a wrong unit is off by far more than this. The figure itself is
+         * compared with the host term, not with /proc/meminfo: a cgroup limit caps it,
+         * and inside a container or a `systemd-run -p MemoryMax=` scope the two differ
+         * by as much as the cap is below the host. */
         FILE *f = fopen("/proc/meminfo", "r");
         double kb_avail = 0.0, kb_total = 0.0;
         char line[256];
@@ -62,9 +66,10 @@ int main(void)
         }
         if (f) fclose(f);
         const double ref_avail = kb_avail * 1024.0, ref_total = kb_total * 1024.0;
-        snprintf(d, sizeof d, "probe %.3f GB, sscanf %.3f GB", avail / 1e9, ref_avail / 1e9);
-        ck(ref_avail > 0.0 && avail > 0.8 * ref_avail && avail < 1.25 * ref_avail,
-           "available agrees with /proc/meminfo", d);
+        snprintf(d, sizeof d, "probe %.3f GB, sscanf %.3f GB", m.host / 1e9, ref_avail / 1e9);
+        ck(ref_avail > 0.0 && m.host > 0.8 * ref_avail && m.host < 1.25 * ref_avail,
+           "host figure agrees with /proc/meminfo", d);
+        ck(avail <= m.host, "available does not exceed the host figure", NULL);
         ck(ref_total > 0.0 && total == ref_total, "total equals MemTotal", NULL);
     }
 #endif

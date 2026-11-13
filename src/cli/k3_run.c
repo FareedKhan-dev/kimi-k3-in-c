@@ -75,7 +75,8 @@
 #include "k3_cfg.h"   /* read the checkpoint's own config rather than assuming it */
 #include "k3_cancel.h" /* first Ctrl-C stops at a safe point; see the header */
 #include "k3_state.h" /* --save-state / --load-state file format */
-#include "k3_sysmem.h" /* available/total memory on Linux, Darwin and Windows */
+#include "k3_sysmem.h" /* available/total memory on Linux, Darwin and Windows; on Linux
+                          capped by the cgroup the process sits in */
 
 static double now_s(void)
 {
@@ -428,6 +429,54 @@ static double peak_rss_bytes(void)
 #endif
 }
 
+/* What can actually be handed to THIS process. On Linux that is MemAvailable capped
+ * by the tightest cgroup limit the process sits under; MemAvailable alone was blind
+ * to the cap: a run inside `MemoryMax=12G` printed `available 65.56 GB`
+ * (tests/fixtures/gates/gates.txt:219, :229), admitted a plan the cgroup could not
+ * hold, and was OOM-killed instead of refused. See k3_sysmem.h for the walk.
+ *
+ * Returns 0 if nothing could be read, with known unset so callers skip the check
+ * exactly as before. A measured zero has known set and must still be checked.
+ * A control file that is present but cannot be trusted
+ * is different: that fails CLOSED, so the caller sees 0 with *malformed set and
+ * must refuse rather than skip. */
+static double mem_available_bytes(K3MemAvail *out)
+{
+    K3MemAvail tmp;
+    if (!out) out = &tmp;
+    k3_mem_probe(out);
+    if (out->malformed) {
+        fprintf(stderr, "\nREFUSING TO START: cannot trust the memory budget: %s\n"
+                        "A cgroup memory control file is present but unreadable, so the\n"
+                        "limit this process runs under is unknowable.\n", out->detail);
+        return 0.0;
+    }
+    return out->known ? out->bytes : 0.0;
+}
+
+/* The `available` line of the memory plan. When a cgroup limit is the binding
+ * term, say so with the numbers, because the figure is then smaller than the box
+ * and a reader comparing it against `free -g` must be able to see why. */
+static void mem_available_line(const K3MemAvail *m, char *o, size_t n)
+{
+    char a[32], l[32], u[32], h[32];
+    human(m->bytes, a, sizeof a);
+    if (m->cgroup >= 0.0 && m->cgroup <= m->bytes) {
+        human(m->cgroup_limit, l, sizeof l);
+        human(m->cgroup_usage, u, sizeof u);
+        if (m->host >= 0.0) {
+            human(m->host, h, sizeof h);
+            snprintf(o, n, "%s  (cgroup v%d limit %s at %s, %s in use; host MemAvailable %s)",
+                     a, m->cgroup_v, l, m->limit_path, u, h);
+        } else {
+            snprintf(o, n, "%s  (cgroup v%d limit %s at %s, %s in use)",
+                     a, m->cgroup_v, l, m->limit_path, u);
+        }
+    } else {
+        snprintf(o, n, "%s", a);
+    }
+}
+
 typedef struct {
     K3LayerBind *lay;
     K3ModelBind  mb;
@@ -680,8 +729,10 @@ static int chat_run(Tok *tok, const K3ChatTemplate *tmpl, K3ChatHistory *history
         }
         if (incremental) {
             const double kv_need = (double)need * K3_KV_BYTES_PER_POS;
-            const double avail = k3_mem_available_bytes();
-            if (avail > 0.0 && kv_need > avail * 0.9) {
+            K3MemAvail mp;
+            const double avail = mem_available_bytes(&mp);
+            if (mp.malformed) return 1;
+            if (mp.known && kv_need > avail * 0.9) {
                 char kb[32], ab[32];
                 human(kv_need, kb, sizeof kb); human(avail, ab, sizeof ab);
                 fprintf(stderr, "chat: KV cache for %d positions needs %s, but only %s is available; history was preserved\n", need, kb, ab);
@@ -1105,7 +1156,9 @@ int main(int argc, char **argv)
      * this machine has, minus a safety margin, and the cache gets real memory only
      * after the whole 110 GB trunk would be resident. */
     if (budget_auto) {
-        const double avail = k3_mem_available_bytes();
+        K3MemAvail mp;
+        const double avail = mem_available_bytes(&mp);
+        if (mp.malformed) return 2;
         if (avail <= 0.0) {
             fprintf(stderr, "--preset auto could not read this machine's available memory; "
                             "pass explicit --trunk-gb/--cache-gb\n");
@@ -1348,13 +1401,15 @@ int main(int argc, char **argv)
      * incremental decode allocates the KV cache; full recompute carries no cache. */
     if (incremental) {
         const double kv_need = (double)(np + gen + 1) * K3_KV_BYTES_PER_POS;
-        const double avail   = k3_mem_available_bytes();
+        K3MemAvail mp;
+        const double avail   = mem_available_bytes(&mp);
+        if (mp.malformed) return 2;
         char kb[32], ab[32];
         human(kv_need, kb, sizeof kb);
         human(avail, ab, sizeof ab);
         printf("  KV cache : %s for %d positions (%.2f MB/position)\n",
                kb, np + gen + 1, K3_KV_BYTES_PER_POS / 1e6);
-        if (avail > 0.0 && kv_need > avail * 0.9) {
+        if (mp.known && kv_need > avail * 0.9) {
             fprintf(stderr,
                 "\nREFUSING: the KV cache for %d positions needs %s but only %s is\n"
                 "available. This is a MEMORY limit, not an engine ceiling: MLA caches\n"
@@ -1440,9 +1495,11 @@ int main(int argc, char **argv)
               * ((double)c.n_heads * (c.qk_nope + c.v_head) + c.qk_rope) * 4
             : 0.0;
         const double need_b = w_trunk + w_model + w_cache + w_state + w_buf + w_kv;
-        const double have = k3_mem_available_bytes();
+        K3MemAvail mp;
+        const double have = mem_available_bytes(&mp);
+        if (mp.malformed) return 1;
 
-        char b2[32], b3[32], b4[32], b5[32], b6[32], b7[32];
+        char b2[32], b3[32], b4[32], b5[32], b6[32], b7[32], bl[1024];
         human(w_kv, b7, sizeof b7);
         human(w_trunk, b1, sizeof b1); human(w_model, b2, sizeof b2);
         human(w_cache, b3, sizeof b3); human(w_state, b4, sizeof b4);
@@ -1453,9 +1510,10 @@ int main(int argc, char **argv)
                "  TOTAL            %s\n",
                trunk_dir ? "(STREAMED)" : "(resident)", b1, b2,
                ultra ? "(STREAMED)" : "(resident)", b3, b4, b5, b7, b6);
-        if (have > 0.0) {
+        if (mp.known) {
             human(have, b1, sizeof b1);
-            printf("  available        %s\n", b1);
+            mem_available_line(&mp, bl, sizeof bl);
+            printf("  available        %s\n", bl);
             if (need_b > have * K3_MEM_ADMIT) {
                 /* Against the ceiling actually enforced, not against `have`: the check
                  * fires between the ceiling and 100%, where need_b - have is negative

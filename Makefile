@@ -156,7 +156,7 @@ CHAT_SRC   := src/chat/k3_chat.c src/chat/k3_sampler.c
 CLI_BIN    := $(BIN)/k3
 
 # Tests that need no checkpoint. These run in CI on every push.
-UNIT_TESTS := test_ops test_cache test_st test_model_stream test_cfg test_tok test_chat test_sampler scale_test k3_model test_trunk test_st_faults test_sysmem test_prefix test_state test_cancel test_json
+UNIT_TESTS := test_ops test_cache test_st test_model_stream test_cfg test_tok test_chat test_sampler scale_test k3_model test_trunk test_st_faults test_sysmem test_mem test_prefix test_state test_cancel test_json
 # Tests that need real shards. Built and run by `make test-all` with SHARD_DIR set;
 # see the weights-test target below.
 WEIGHT_TESTS := test_expert test_real_layer
@@ -234,6 +234,10 @@ $(BIN)/test_prefix: tests/unit/test_prefix.c src/chat/k3_prefix.h | $(BIN)
 # The memory probe is one platform call per OS and nothing else; built the same way.
 $(BIN)/test_sysmem: tests/unit/test_sysmem.c src/cli/k3_sysmem.h | $(BIN)
 	$(CC) -O2 -std=gnu99 $(WARN) $(INCLUDES) -Isrc/cli $< -o $@
+# The fixture probe and its CLI admission callers; test_mem.c includes k3_run.c
+# to replace only the live probe and the chat allocator in this test binary.
+$(BIN)/test_mem: tests/unit/test_mem.c src/cli/k3_sysmem.h $(CLI_SRC) $(CHAT_SRC) $(ENGINE_OBJ) | $(BIN)
+	$(CC) $(CFLAGS) $(INCLUDES) -Isrc/cli $< src/cli/k3_state.c $(CHAT_SRC) $(ENGINE_OBJ) -o $@ $(LDFLAGS)
 
 # Allocates at REAL model widths (a ~1.8 GB KDA layer), so it needs the optimised build
 # rather than the portable C99 one the tokenizer and config tests use.
@@ -319,6 +323,7 @@ test: $(CLI_BIN) $(TEST_BINS)
 	@echo "== config reader ==";     ./$(BIN)/test_cfg fixture $(FIXTURES)/ref_k3.json
 	@echo "== interrupt contract =="; ./$(BIN)/test_cancel
 	@echo "== memory probe ==";     ./$(BIN)/test_sysmem
+	@echo "== cgroup memory cap ==";  ./$(BIN)/test_mem $(BUILD)/memprobe
 	@echo "== config refusals =="; \
 	  for f in no_layermap bad_layer_index bad_topk; do \
 	      ./$(BIN)/test_cfg reject $(FIXTURES)/cfg/$$f.json || exit 1; \
