@@ -10,7 +10,7 @@ Total is about 12 MB.
 |---|---:|---|---|
 | `ops/` | ~2 MB | `test_ops` | `tools/emit_fixtures.py` |
 | `ops/MANIFEST.json` | none | `test_ops` | same; lists fixtures and tolerances |
-| `cache/` | ~200 KB | `test_cache` | `tools/make_cache_fixture.py` |
+| `cache/` | ~100 KB | `test_cache` | `tools/make_cache_fixture.py` |
 | `st/` | ~50 KB | `test_st` | `tools/make_st_fixture.py` |
 | `ref_k3.json` | 6 KB | `k3_model` | `tools/make_k3_oracle.py` |
 | `tiny_k3.bin`, `tiny_k3.json` | 9 MB | `k3_model` | same |

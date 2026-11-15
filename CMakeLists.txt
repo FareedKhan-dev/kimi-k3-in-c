@@ -177,7 +177,7 @@ set(FIX ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures)
 add_test(NAME ops        COMMAND test_ops   ${FIX}/ops)
 add_test(NAME cache      COMMAND test_cache ${FIX}/cache)
 # The fixture's experts are a few KB, so the default 1 MiB chunk never splits a read and
-# the chunked path would ship untested. A 4 KiB chunk splits sixteen of them.
+# the chunked path would ship untested. A 4 KiB chunk splits nineteen of the 24.
 add_test(NAME cache_split_reads COMMAND test_cache ${FIX}/cache)
 set_tests_properties(cache_split_reads PROPERTIES ENVIRONMENT "K3_EXPERT_CHUNK=4096")
 add_test(NAME config     COMMAND test_cfg   fixture ${FIX}/ref_k3.json)

@@ -96,6 +96,7 @@ int main(int argc, char **argv)
 
     K3Cfg c; memset(&c, 0, sizeof c);
     c.n_layers = 1; c.n_experts = NE; c.topk = 4;
+    c.latent = 64; c.moe_inter = 32;     /* tools/make_cache_fixture.py LATENT, INTER */
 
     /* Size the budget by asking, not by arithmetic. The cache rounds a slot up to an
      * O_DIRECT-widened, page-aligned size, so for these deliberately tiny fixture
@@ -110,6 +111,23 @@ int main(int argc, char **argv)
         if (k3_cache_init(&cache, &st, &c, budget) == 0) { ok_init = 1; break; }
     }
     if (!ok_init) { fprintf(stderr, "cache init failed at every budget\n"); return 2; }
+
+    {   /* The kernels multiply an expert as latent x moe_inter from the config, never from
+         * the tensor shapes, so an expert of any other shape must be refused, not read
+         * past. Transposed counts are the plausible mistake: the same byte total. */
+        K3Cfg bad = c; bad.latent = 32; bad.moe_inter = 64;
+        K3Cache tmp;
+        ck(k3_cache_init(&tmp, &st, &bad, probe.nbytes * 4096) != 0,
+           "cache refuses a config of another shape", "latent and moe_inter swapped");
+        ck(k3_expert_check_shape(&probe, c.latent, c.moe_inter) == 0,
+           "fixture experts match the config", NULL);
+        K3ExpertRef r = probe; r.m[1].rows = c.latent / 2;
+        ck(k3_expert_check_shape(&r, c.latent, c.moe_inter) != 0,
+           "a narrower w2 is refused", NULL);
+        r = probe; r.m[2].pcols = c.latent / 4;
+        ck(k3_expert_check_shape(&r, c.latent, c.moe_inter) != 0,
+           "a narrower w3 is refused", NULL);
+    }
     { char b[80]; snprintf(b, sizeof b, "%d slots for %d experts, top-%d",
                            cache.nslot, NE, c.topk);
       ck(cache.nslot >= c.topk + 1 && cache.nslot < NE, "cache under pressure", b); }
