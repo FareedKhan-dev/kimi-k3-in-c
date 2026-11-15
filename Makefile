@@ -295,6 +295,10 @@ test: $(CLI_BIN) $(TEST_BINS)
 	  if command -v $(PYTHON) >/dev/null 2>&1; then \
 	      K3_TEST_BIN=./$(CLI_BIN) $(PYTHON) tests/unit/test_cli_output_failures.py; \
 	  else echo "  NOT RUN: no $(PYTHON) on PATH"; fi
+	@echo "== extended numeric CLI contract =="; \
+	  if command -v $(PYTHON) >/dev/null 2>&1; then \
+	      K3_TEST_BIN=./$(CLI_BIN) $(PYTHON) tests/unit/test_cli_numbers.py; \
+	  else echo "  NOT RUN: no $(PYTHON) on PATH"; fi
 	@echo "== partial download contract =="; \
 	  if ! command -v $(PYTHON) >/dev/null 2>&1; then \
 	      echo "  NOT RUN: no $(PYTHON) on PATH. tools/layers_to_shards.py backs"; \
