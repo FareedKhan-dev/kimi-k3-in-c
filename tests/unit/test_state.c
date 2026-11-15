@@ -197,6 +197,15 @@ int main(int argc, char **argv)
         memcpy(m, img, n); m[1] ^= 0xFF;
         spit(mut, m, n);
         ck(k3_state_peek(mut, &hd) != 0, "wrong magic refused at peek", NULL);
+        /* The CLI sizes buffers from these counts before k3_state_load runs, so they
+         * are refused at peek, not only at load. */
+        memcpy(m, img, n); h->nseq = INT32_MAX; spit(mut, m, n);
+        ck(k3_state_peek(mut, &hd) != 0, "token count that overflows the plan refused at peek",
+           NULL);
+        memcpy(m, img, n); h->nseq = -1; spit(mut, m, n);
+        ck(k3_state_peek(mut, &hd) != 0, "negative token count refused at peek", NULL);
+        memcpy(m, img, n); h->cached = h->nseq + 1; spit(mut, m, n);
+        ck(k3_state_peek(mut, &hd) != 0, "cached past the ids refused at peek", NULL);
         free(m);
     }
     {

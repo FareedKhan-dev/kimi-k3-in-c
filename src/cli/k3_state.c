@@ -3,6 +3,7 @@
 #include "k3_portable_io.h"   /* fsync() and rename() shims for MinGW; see the header */
 
 #include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -73,6 +74,18 @@ int k3_state_peek(const char *path, K3StateHdr *hd)
     if (hd->version != K3_STATE_VER) {
         fprintf(stderr, "%s is state version %d, this build writes %d\n",
                 path, hd->version, K3_STATE_VER);
+        return -1;
+    }
+    /* The caller sizes its buffers from this header BEFORE k3_state_load can check it:
+     * prior = nseq, then Tmax = prior + np + gen + 1, in int. So what no save could
+     * have written is refused here: a negative count, cached positions past the ids,
+     * and a count that would overflow that sum, given that np and gen are each bounded
+     * by the engine's ceilings. There is deliberately no tighter cap: a chain of
+     * --load-state runs may legitimately carry more than one run's ceiling. */
+    if (hd->nseq < 0 || hd->cached < 0 || hd->cached > hd->nseq ||
+        hd->nseq > INT_MAX - (K3_MAX_PROMPT + K3_MAX_GEN + 8)) {
+        fprintf(stderr, "%s holds %d token ids for %d cached positions, which no save "
+                        "writes\n", path, hd->nseq, hd->cached);
         return -1;
     }
     return 0;
