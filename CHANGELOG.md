@@ -5,6 +5,75 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-11-15
+
+Long prompts stop being a one-core job, and a large round of fixes, most of them from
+outside contributors, makes everything that loads, parses, measures or certifies refuse a
+wrong input instead of quietly using it. Output is unchanged wherever it was already
+defined: every oracle gate still matches the reference exactly, at any thread count.
+
+Checked on the released checkpoint before tagging, on a 28-core AMD EPYC 9554: the first
+eight layers, both MLA layers among them, give byte-identical logits and the same tokens
+on 1.1.0 and 2.0.0 for a 613-token prompt, with no expert drops; real layers 1 (KDA) and 3
+(MLA) match the PyTorch reference at float32 rounding, about 1e-7 relative error against a
+5e-4 budget; and `make test` passes there on Linux with the released tokenizer present.
+
+Compatibility notes, which are why this is a major version:
+
+- **`--save-state` files move to version 3.** The header is now part of the checksum. A
+  version 2 file is refused with a clear message rather than read; regenerate it with
+  `--gen 0 --incremental --save-state`.
+- **MLA scratch is larger.** The score term of `k3_mla_scratch_cached()` and
+  `k3_mla_scratch()` grew from T to H*T floats. Code that sizes scratch through the
+  helpers is unaffected; code that computed it by hand is now short. `K3Cache` gained
+  fields, so anything embedding it must be rebuilt.
+- **Chat sampling with both `--top-k` and `--top-p`** now measures the nucleus against the
+  mass that survives top-k, which is what the Hugging Face and vLLM samplers do. A
+  fixed-seed run that uses both flags samples differently; either flag alone is unchanged.
+- **Malformed numbers are refused.** `--gen`, `--spec`, `--trunk-ring`, the GB budgets,
+  `--temperature`, `--top-p`, `--seed` and `--stop-id` no longer go through `atoi`/`atof`:
+  `--gen 1junk`, an empty `--seed` or `--stop-id 4294967296` exit 2 instead of running a
+  different experiment. A prompt longer than 32,768 ids is refused instead of truncated.
+
+### Changed
+
+- **MLA attention runs across heads in parallel.** The causal attention loop was the one
+  serial O(T^2) piece of work left: a 21k-token prefill is ~1.6e14 multiply-adds across the
+  24 MLA layers, and all of it ran on one core, which is why ROADMAP item 1 said a long
+  prompt did not finish. Heads share only keys and values, and every reduction inside a
+  head keeps its serial order, so the output is bit-identical at any thread count;
+  `test_ops` now requires that on the MLA fixture. Decode at 4,096 positions, at the
+  released head geometry (`bench_kernels`, Intel Core Ultra 7 255H): 303.3 ms per MLA
+  layer on one thread, 38.6 ms on 16, 7.28 s/token to 0.93 s/token over the 24 layers,
+  with identical output hashes. Decode attention is linear in context, so at 32k the old
+  loop alone cost ~58 s per token on that machine.
+- **The CLI records the expert request trace only when asked for it.** It grew without
+  bound on every run, quadratically under full recompute, whether or not
+  `--dump-cache-trace` was given. Library users keep the old default and gain
+  `k3_cache_set_trace()` (#104).
+- **`make` rebuilds when compiler flags or headers change.** `make asan`, `debug` and
+  `portable` used to relink objects from whatever was built last, so `make asan` after
+  `make` produced a binary that was not instrumented (#95).
+- **The benchmark harnesses read the engine's own result JSON** instead of grepping logs,
+  require a fresh receipt per run, refuse a repetition count that would run nothing, and
+  refuse to certify identical output when no rung succeeded. `gb_read` stays routed-expert
+  bytes, the metric `docs/data/` publishes (#99, #106).
+- **The macOS CI job runs on `macos-15`.** GitHub retired `macos-14`, and the job had been
+  showing as cancelled on every pull request since early November.
+
+### Added
+
+- **Memory admission respects cgroup limits.** On Linux the figure plans are checked
+  against is MemAvailable capped by the tightest memory cgroup the process sits in, so a
+  run inside a container or `systemd-run -p MemoryMax=` is refused with both numbers
+  instead of being OOM-killed. A control file that is present but unreadable fails closed
+  (#84).
+- **The tokenizer loader has a weightless gate.** `tests/fixtures/tok` is a 260-rank
+  synthetic vocabulary that only encodes correctly with rank BPE over byte-level keys,
+  plus one corrupt variant per refusal, so the loader runs in CI for the first time (#111).
+- **A Termux guide** for building and running the weightless suite on Android ARM64,
+  [docs/TERMUX.md](docs/TERMUX.md) (#109).
+
 ### Fixed
 
 - **An expert whose E8M0 scales carried the NaN code loaded silently.** Scale byte 255 is
@@ -13,8 +82,50 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   nothing said so. The streaming cache now scans the scale bytes of every expert as they
   land in memory, 1 byte per 32 weights, and refuses the expert naming the shard file, the
   tensor and the count; the run then fails the way a missing tensor fails it. The kernel
-  mapping stays as defence in depth. The 7,168 real scale bytes in `tests/fixtures/mxfp4.json`
-  range 120 to 122; the 96 released shards were not re-checked for this change.
+  mapping stays as defence in depth. Checked against the released checkpoint by range
+  request: 284.9 MB of real scale bytes, three experts in each of the 92 MoE layers,
+  contain no 255 (#86).
+- **An expert of the wrong shape was multiplied past its own bytes.** The kernels index
+  every expert with the config's `latent` and `moe_inter`, and the cache only checked an
+  expert against itself. Experts are now held to the config's shape, the probe that sizes
+  every slot included. All 82,432 experts in the released headers have that shape (#115).
+- **A split expert read with a short middle chunk was published with a hole in it.**
+  Coverage was decided from the sum of the chunks, and the aligned window's tail slack let a
+  short middle chunk still reach the payload end, the pattern NFS, SMB and FUSE produce
+  after a partial read (#114).
+- **`--layers 1` could not run.** Its shard set holds no routed expert, so the cache refused
+  to start, and the documented ~7 GB development path exited 1 on every machine (#87).
+- **A state file's header was trusted.** Its layout fields sized reads into buffers the
+  caller had sized from its own config: one too large overran them, and a shifted pair
+  moved KV rows into the rope cache with the checksum still matching. They are checked
+  against the config before any read, impossible counts are refused at peek, before the CLI
+  sizes anything from them, and trailing bytes are refused (#113).
+- **A prompt longer than the ceiling was silently cut** to its first 32,768 ids, usually
+  losing the question; the refusal meant to catch it could never fire (#112).
+- **A corrupt or truncated `tiktoken.model` loaded.** A download cut inside the last rank
+  replaced rank 1; one cut at a line boundary lost the tail of the vocabulary and still
+  passed a roundtrip. Ranks must now be exactly 0..N-1 once each, with added tokens right
+  after them (#111).
+- **A failed `--out`, logits dump or trace write exited 0**, because buffered writes only
+  fail at close; they now exit 3. An enabled but empty trace is written as an empty file
+  rather than failing a `--layers 1` run (#101).
+- **The chat sampler turned NaN or infinite logits into a token**, and a tiny temperature
+  could overflow to inf - inf; both are refused or handled now (#91).
+- **The tools, scripts and harnesses that certify results could certify nothing.**
+  `conform_all.py` reported ALL LAYERS CONFORM for an empty range, resolved paths against
+  the wrong directory, and could verify a stale dump from an earlier run (#93, #96, #108).
+  `cmp_logits.py` claimed full-model verification for any two matching arrays (#94).
+  `devbw.py` counted short reads as full ones and measured buffered reads under an
+  O_DIRECT label (#92). `qdq_trunk.py` silently ignored a group size it could not use
+  (#97), `int8_trunk.py` could truncate its own source (#105), `pack_trunk.py` destroyed a
+  good trunk when a pack failed (#107), `budget.py` crashed on partial shard sets (#100),
+  `tok.py` searched the wrong root and overrode an explicit `K3_TOK_FILES` (#102),
+  `sim_cache.py` replayed malformed traces (#103), and `k3-doctor.sh` could delete a
+  caller's file of the same name as its probe (#98).
+- **On Windows with the released tokenizer present, `make test` failed** in `test_chat`,
+  which wrote to a literal `/tmp`; Termux has no `/tmp` either. The tests honour
+  `TEMP`/`TMP`/`TMPDIR`. `make tok TOK_FILES=...` now passes `TOK_FILES` through, as
+  docs/TESTING.md always said it did.
 
 - **The trunk report counted a prefetched layer as a hit** whenever its read finished
   before the walk bound it. On a fully streamed run of the tiny checkpoint, every one of
@@ -277,7 +388,8 @@ First public release.
 
 See [docs/ROADMAP.md](docs/ROADMAP.md).
 
-[Unreleased]: https://github.com/FareedKhan-dev/kimi-k3-in-c/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/FareedKhan-dev/kimi-k3-in-c/compare/v2.0.0...HEAD
+[2.0.0]: https://github.com/FareedKhan-dev/kimi-k3-in-c/compare/v1.1.0...v2.0.0
 [1.1.0]: https://github.com/FareedKhan-dev/kimi-k3-in-c/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/FareedKhan-dev/kimi-k3-in-c/compare/v0.1.0...v1.0.0
 [0.1.0]: https://github.com/FareedKhan-dev/kimi-k3-in-c/releases/tag/v0.1.0

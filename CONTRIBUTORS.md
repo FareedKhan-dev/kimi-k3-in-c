@@ -61,8 +61,11 @@ v1.1.0 are committed under their author's name.
   that stops at a safe point and still writes everything; a
   checksummed state file published by atomic rename; chat turns that reuse the previous
   turn's state behind a bit-exact gate; available memory that is real on macOS and
-  capped by commit headroom on Windows; missing-shard diagnostics that name the file; and
-  safetensors span checks validated against every shard of the released checkpoint.
+  capped by commit headroom on Windows; missing-shard diagnostics that name the file;
+  safetensors span checks validated against every shard of the released checkpoint;
+  memory admission that respects the cgroup limit a container or `systemd-run` scope
+  imposes, measured down to the dirty pages that cannot count as room; and refusing an
+  expert whose E8M0 scales carry the NaN code.
 - **[Deobot2](https://github.com/Deobot2)** -- largest-first trunk pinning, the
   `--trunk-ring` flag, and two prefetcher re-read bugs found by instrumentation rather
   than by inspection.
@@ -85,5 +88,20 @@ v1.1.0 are committed under their author's name.
   expert reads so a batch no longer waits on its slowest read.
 - **[Irfanwani](https://github.com/Irfanwani)** -- the `--layers N` download mode, so the
   pipeline can be exercised on a disk too small for the checkpoint.
+- **[Rudy Celekli](https://github.com/rudycelekli)**: most of the 2.0.0 hardening round.
+  In the engine, a tokenizer loader that refuses a corrupt or truncated vocabulary, state
+  headers checked against the config before any read, a prompt past the ceiling refused
+  instead of cut, experts held to the config's shape, split reads with a short middle
+  chunk refused, output writes that fail the run when they fail, an opt-in request trace,
+  strict numeric flags, a chat sampler that refuses invalid logits and measures the
+  nucleus after top-k, and a Makefile that rebuilds when flags or headers change. In the
+  tools, conformance, logit, benchmark, bandwidth, quantization, packing, budget,
+  tokenizer-path, cache-replay and doctor scripts that refuse to report what they did not
+  measure.
+- **[WaleedHU](https://github.com/WaleedHU)**: made the documented `--layers 1`
+  development path actually run, with an empty expert cache when the shard set holds no
+  routed expert.
+- **[mechmind-dwv](https://github.com/mechmind-dwv)**: the Termux guide for Android ARM64,
+  and the report that showed two tests assumed a writable `/tmp`.
 
 Thank you, all of you.

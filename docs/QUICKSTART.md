@@ -89,8 +89,10 @@ as well as visible replies, because K3 needs that complete record for the next t
 fit. Shorten it, or drop `--incremental` (full recompute carries no KV cache, but is
 O(T²) in time).
 
-**Very slow with a long prompt**, expected. Prefill is not chunked and MLA attention is
-quadratic in sequence length. See [ROADMAP.md](ROADMAP.md).
+**Very slow with a long prompt**, expected, though less than before 2.0.0. MLA attention is
+quadratic in sequence length; since 2.0.0 it runs across all cores instead of one, but
+every prompt token still re-reads the trunk for its projections. See
+[ROADMAP.md](ROADMAP.md).
 
 **"config could not be read with confidence"**, the reader found a config it does not
 fully understand and refused rather than guessing. The message lists every missing field.

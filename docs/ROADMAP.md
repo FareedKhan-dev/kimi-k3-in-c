@@ -2,13 +2,21 @@
 
 Ordered by value, with the reasoning stated so the order can be argued with.
 
-## 1. Chunked prefill, the highest-value missing piece
+## 1. Long prompts: what is left after 2.0.0
 
-Prefill currently runs as a single forward pass over the whole prompt, and attention in
-the 24 MLA layers is quadratic in sequence length. The practical effect: the context
-ceiling is 32k tokens, but a 21k-token prompt does not complete in reasonable time.
+The part that made a long prompt impractical is done: MLA attention, quadratic in sequence
+length and the one serial O(T^2) loop in the engine, runs across the 96 heads in parallel
+since 2.0.0, bit-identical at any thread count. Two costs remain, and both are now the
+things worth measuring.
 
-Raising the ceiling was necessary and is done. This is the part that makes it usable.
+Prefill is still one forward pass over the whole prompt, so its activations grow with it,
+about 14 GB at 32k positions next to a 77.7 GB KV cache. Chunked prefill would bound that,
+reusing the tail-prefill path GATE 3b already proves exact.
+
+Every prompt token still re-reads the trunk from memory for its projections, about 109 GB
+of bf16 per token, which a batched projection kernel would amortise across a chunk. The
+batched bf16 kernel from #67 is the starting point, once a wall-clock number on a long
+prefill shows it winning.
 
 ## 2. Re-run the published campaign under the replicating harness
 

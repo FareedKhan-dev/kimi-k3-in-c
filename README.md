@@ -11,7 +11,7 @@
 <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square" alt="License"></a>
 <a href="Makefile"><img src="https://img.shields.io/badge/C99-portable-lightgrey?style=flat-square" alt="C99"></a>
 <a href="#requirements"><img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey?style=flat-square" alt="Platform"></a>
-<a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-1.1.0-brightgreen?style=flat-square" alt="Version"></a>
+<a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-2.0.0-brightgreen?style=flat-square" alt="Version"></a>
 </p>
 
 <table>
@@ -3460,8 +3460,9 @@ Raw data: [`docs/data/trunk-quantisation.txt`](docs/data/trunk-quantisation.txt)
   not yet supported.
 - **Batch remains greedy.** Its outputs remain identical across memory budgets. Chat alone
   adds opt-in temperature/top-p sampling and `--greedy`.
-- **No chunked prefill.** The ceiling is 32,768 tokens, but a 21,000 token prompt is one
-  quadratic pass.
+- **No chunked prefill.** The ceiling is 32,768 tokens, and a 21,000 token prompt is still
+  one quadratic pass. Since 2.0.0 its MLA attention runs across all cores instead of one,
+  but every prompt token still re-reads the trunk for its projections.
 - **Context is bounded by memory, not by the engine.**
 
 ![The advertised million-token context is a memory fact, not an engine limit](docs/images/eq_context_ceiling.png)

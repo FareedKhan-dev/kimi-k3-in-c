@@ -1,6 +1,6 @@
 [project]
 name = "kimi-k3-in-c"
-version = "1.1.0"
+version = "2.0.0"
 description = "Python tooling for the Kimi K3 inference engine: fixture generation, reference-vs-C conformance, cache replay"
 requires-python = ">=3.12"
 # Pinned exact, not a range, so the next environment anyone builds from this file
