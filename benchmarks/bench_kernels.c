@@ -23,6 +23,9 @@
 #include <time.h>
 
 #include "k3.h"
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 static double now_s(void)
 {
@@ -154,6 +157,87 @@ int main(void)
         const double per_tok = dt * 3.0 * 16 * 92;
         printf("             16 experts x 3 mats x 92 layers -> %.2f s/token\n", per_tok);
         free(pk); free(sc); free(x); free(y);
+    }
+
+    /* ---------- Gated MLA attention: real head geometry, decode at long context ------
+     * What scales with context is the attention loop itself, so the projections here
+     * are deliberately tiny (hidden 256, q_lora 64, kv_lora 64, fp32) while the part that
+     * matters is the released one: 96 heads, 192-wide q.k (128 nope + 64 shared rope),
+     * 128-wide values, over a filled KV cache of P positions. Decode attention is linear
+     * in P, so the per-layer time here scales directly to longer contexts. */
+    {
+        enum { H = 96, QN = 128, QR = 64, VH = 128, P = 4096 };
+        const int kvd = QN + VH, qh = QN + QR;
+        K3Cfg c; memset(&c, 0, sizeof c);
+        c.n_heads = H; c.qk_nope = QN; c.qk_rope = QR; c.v_head = VH;
+        c.hidden = 256; c.q_lora = 64; c.kv_lora = 64; c.rms_eps = 1e-6f;
+        const int E = c.hidden, kvw = c.kv_lora + QR;
+        float *q_a = (float *)malloc((size_t)c.q_lora * E * sizeof(float));
+        float *q_b = (float *)malloc((size_t)H * qh * c.q_lora * sizeof(float));
+        float *kv_a = (float *)malloc((size_t)kvw * E * sizeof(float));
+        float *kv_b = (float *)malloc((size_t)H * kvd * c.kv_lora * sizeof(float));
+        float *wo = (float *)malloc((size_t)E * H * VH * sizeof(float));
+        float *wg = (float *)malloc((size_t)H * VH * E * sizeof(float));
+        float *n1 = (float *)malloc((size_t)c.q_lora * sizeof(float));
+        float *n2 = (float *)malloc((size_t)c.kv_lora * sizeof(float));
+        float *kvc = (float *)malloc((size_t)P * H * kvd * sizeof(float));
+        float *ropec = (float *)malloc((size_t)P * QR * sizeof(float));
+        float *x = (float *)malloc((size_t)E * sizeof(float));
+        float *y = (float *)malloc((size_t)E * sizeof(float));
+        float *scr = (float *)malloc(k3_mla_scratch_cached(&c, 1, P, 1) * sizeof(float));
+        if (!q_a || !q_b || !kv_a || !kv_b || !wo || !wg || !n1 || !n2 || !kvc || !ropec ||
+            !x || !y || !scr) { printf("alloc failed\n"); return 1; }
+        fillf(q_a, (size_t)c.q_lora * E, 11u);  fillf(q_b, (size_t)H * qh * c.q_lora, 12u);
+        fillf(kv_a, (size_t)kvw * E, 13u);      fillf(kv_b, (size_t)H * kvd * c.kv_lora, 14u);
+        fillf(wo, (size_t)E * H * VH, 15u);     fillf(wg, (size_t)H * VH * E, 16u);
+        for (int i = 0; i < c.q_lora; i++) n1[i] = 1.0f;
+        for (int i = 0; i < c.kv_lora; i++) n2[i] = 1.0f;
+        fillf(kvc, (size_t)P * H * kvd, 17u);   fillf(ropec, (size_t)P * QR, 18u);
+        fillf(x, E, 19u);
+        K3MlaW w; memset(&w, 0, sizeof w);      /* wdt 0: fp32 weights */
+        w.q_a = q_a; w.q_b = q_b; w.kv_a = kv_a; w.kv_b = kv_b; w.o = wo; w.g = wg;
+        w.q_a_norm = n1; w.kv_a_norm = n2;
+
+        /* One decode step at position P-1, attending over all P cached positions. It
+         * rewrites only position P-1 of the cache, from the same input each time. */
+        double t1 = 0.0, tn = 0.0;
+        unsigned long long h1 = 0, hn = 0;
+        int nth = 1;
+        for (int pass = 0; pass < 2; pass++) {
+#ifdef _OPENMP
+            const int want = pass == 0 ? 1 : omp_get_num_procs();
+            omp_set_num_threads(want);
+            nth = want;
+#else
+            if (pass == 1) break;
+#endif
+            k3_mla_cached(y, x, &w, &c, 1, scr, kvc, ropec, P - 1, P);   /* warm */
+            const int reps = 3;
+            const double t0 = now_s();
+            for (int r = 0; r < reps; r++)
+                k3_mla_cached(y, x, &w, &c, 1, scr, kvc, ropec, P - 1, P);
+            const double dt = (now_s() - t0) / reps;
+            unsigned long long h = 1469598103934665603ull;
+            for (int k = 0; k < E; k++) {
+                union { float f; unsigned u; } b; b.f = y[k];
+                for (int t = 0; t < 4; t++) { h ^= (b.u >> (8 * t)) & 0xFFu; h *= 1099511628211ull; }
+            }
+            if (pass == 0) { t1 = dt; h1 = h; } else { tn = dt; hn = h; }
+        }
+        printf("\nMLA attention, 96 heads, decode at %d positions\n", P);
+        printf("             1 thread    %8.2f ms/layer -> %6.2f s/token over 24 MLA layers\n",
+               t1 * 1e3, t1 * 24);
+        if (tn > 0.0) {
+            printf("             %-3d threads %8.2f ms/layer -> %6.2f s/token  (%.1fx)\n",
+                   nth, tn * 1e3, tn * 24, t1 / tn);
+            printf("             output FNV1a %016llx vs %016llx: %s\n", h1, hn,
+                   h1 == hn ? "bit-identical" : "DIFFERENT");
+            if (h1 != hn) return 1;
+        }
+        printf("             attention is linear in context at decode: x%d at %d positions\n",
+               32768 / P, 32768);
+        free(q_a); free(q_b); free(kv_a); free(kv_b); free(wo); free(wg); free(n1); free(n2);
+        free(kvc); free(ropec); free(x); free(y); free(scr);
     }
 
     printf("\nmeasured compute budget at the floor is about 10 s/token; whichever line\n"

@@ -17,6 +17,9 @@
 
 #include "json.h"
 #include "k3.h"
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 /* FALLBACKS ONLY. The authority is the tolerance block in MANIFEST.json, loaded by main
  * and applied to every comparison. These values are used only if the manifest cannot be
@@ -448,6 +451,27 @@ static void t_mla(const char *dir)
             printf("        H=%d qh=%d (nope %d + rope %d) v=%d kv_lora=%d scale=%.6f\n",
                    c.n_heads, c.qk_nope + c.qk_rope, c.qk_nope, c.qk_rope,
                    c.v_head, c.kv_lora, 1.0 / sqrt((double)(c.qk_nope + c.qk_rope)));
+#ifdef _OPENMP
+            /* The attention heads run in parallel. One thread must give the same BITS,
+             * not merely a result inside the tolerance above: a reduction that crossed
+             * heads, or a score row two heads shared, would pass the tolerance and show
+             * up here as a difference in the last place. Counted only as a failure, so
+             * the pass total CI checks for is unchanged when it holds. */
+            float *y1 = (float *)malloc((size_t)T * c.hidden * sizeof(float));
+            if (y1) {
+                const int nt = omp_get_max_threads();
+                omp_set_num_threads(1);
+                k3_mla(y1, x, &w, &c, T, scratch);
+                omp_set_num_threads(nt);
+                const int same = !memcmp(y, y1, (size_t)T * c.hidden * sizeof(float));
+                printf("        heads in parallel on %d threads: %s\n", nt,
+                       same ? "bit-identical to one thread" : "DIFFERS from one thread");
+                if (!same) g_fail++;
+                free(y1);
+            } else {
+                g_fail++;
+            }
+#endif
         }
         free(scratch); free(y);
     }

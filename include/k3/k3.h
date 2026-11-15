@@ -196,8 +196,9 @@ void k3_matmul(float *y, const float *x, const float *W, int in, int out);
  *   + T*(kv_lora+qk_rope)        compressed latent plus the shared rope slot
  *   + q_lora                     transient
  *   + 2*H*v_head                 attention accumulator and gate buffer
- *   + T                          scores
- * floats. Use k3_mla_scratch() rather than recomputing this.
+ *   + H*T                        scores, one row per head (the heads run in parallel)
+ * floats. Use k3_mla_scratch() rather than recomputing this: the score term grew from
+ * T to H*T in 2.0.0, and a hand-computed size from before then is now too small.
  */
 typedef struct {
     /* Tagged by wdt: fp32 when zero (every fixture), bf16 for the real checkpoint. */

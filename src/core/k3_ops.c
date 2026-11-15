@@ -343,9 +343,9 @@ void k3_mla_cached(float *out, const float *x, const K3MlaW *w, const K3Cfg *c,
     float *ql   = ct   + (size_t)kvw;               /* [q_lora]       */
     float *acc  = ql   + (size_t)c->q_lora;         /* [H][vh]        */
     float *gbuf = acc  + (size_t)H * vh;            /* [H][vh] gate   */
-    float *sc   = gbuf + (size_t)H * vh;            /* [last+1] scores */
+    float *sc   = gbuf + (size_t)H * vh;            /* [H][last+1] scores, one row per head */
     /* Without a cache the keys/values live in scratch and cover only this call. */
-    float *kvs  = sc   + (size_t)(last + 1);        /* [T][H][kvd]    */
+    float *kvs  = sc   + (size_t)H * (last + 1);    /* [T][H][kvd]    */
     float *rps  = kvs  + (kvc ? 0 : (size_t)T * H * kvd);   /* [T][qr] */
 
     #define K3_KV_AT(p)   (kvc   ? kvc   + (size_t)(p) * H * kvd : kvs + (size_t)(p) * H * kvd)
@@ -367,11 +367,25 @@ void k3_mla_cached(float *out, const float *x, const K3MlaW *w, const K3Cfg *c,
         k3_mmw(K3_KV_AT(p), ct, w->kv_b, w->wdt, c->kv_lora, H * kvd);
     }
 
-    /* ---- attention, per head, causal ---- */
+    /* ---- attention, per head, causal ----
+     *
+     * The heads run in parallel. This loop used to be the only serial O(T^2) work in
+     * the engine: a 21k-token prefill is ~1.6e14 multiply-adds across the 24 MLA
+     * layers, and all of them ran on one core. Parallel over heads
+     * changes nothing about the result, to the bit: a head reads only shared keys and
+     * values, writes only its own score row and its own vh slice of acc, and every
+     * reduction inside it runs in exactly the serial order (scores over s, the max,
+     * the exp sum z in double, the weighted sum). No value crosses between heads until
+     * the gate and o_proj below, which stay serial. One score row per head is what the
+     * H * (last+1) scratch term in k3_mla_scratch_cached pays for. */
     for (int t = 0; t < T; t++) {
         const int p = cached + t;
+#ifdef _OPENMP
+#       pragma omp parallel for schedule(static)
+#endif
         for (int h = 0; h < H; h++) {
             const float *qt = q + ((size_t)t * H + h) * qh;
+            float *sch = sc + (size_t)h * (last + 1);     /* this head's scores only */
             float m = -INFINITY;
             for (int s = 0; s <= p; s++) {                 /* causal: s <= p */
                 const float *ks = K3_KV_AT(s) + (size_t)h * kvd;
@@ -381,16 +395,16 @@ void k3_mla_cached(float *out, const float *x, const K3MlaW *w, const K3Cfg *c,
                 /* the rope slot is UNROTATED but still scored, and the SAME 64
                  * values serve every head. Dropping this term is the silent bug. */
                 for (int i = 0; i < qr; i++) d += (double)qt[qn + i] * (double)kr[i];
-                sc[s] = (float)d * scale;
-                if (sc[s] > m) m = sc[s];
+                sch[s] = (float)d * scale;
+                if (sch[s] > m) m = sch[s];
             }
             double z = 0.0;
-            for (int s = 0; s <= p; s++) { sc[s] = expf(sc[s] - m); z += sc[s]; }
+            for (int s = 0; s <= p; s++) { sch[s] = expf(sch[s] - m); z += sch[s]; }
 
             float *o = acc + (size_t)h * vh;
             for (int j = 0; j < vh; j++) o[j] = 0.0f;
             for (int s = 0; s <= p; s++) {
-                const float pr = (float)(sc[s] / z);
+                const float pr = (float)(sch[s] / z);
                 const float *vs = K3_KV_AT(s) + (size_t)h * kvd + qn;
                 for (int j = 0; j < vh; j++) o[j] += pr * vs[j];
             }
@@ -524,7 +538,7 @@ size_t k3_mla_scratch_cached(const K3Cfg *c, int T, int cap, int cached_mode)
              + (size_t)(c->kv_lora + c->qk_rope)       /* ct transient */
              + (size_t)c->q_lora
              + (size_t)2 * H * vh                      /* acc, gbuf    */
-             + (size_t)(cap > T ? cap : T);            /* scores       */
+             + (size_t)H * (cap > T ? cap : T);        /* scores, a row per head */
     if (!cached_mode) n += (size_t)T * H * kvd + (size_t)T * c->qk_rope;
     return n;
 }
