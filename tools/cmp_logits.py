@@ -30,6 +30,13 @@ import sys
 import numpy as np
 
 
+def load_json(path):
+    """Read one JSON file and close it. utf-8, not the platform default, which is
+    cp1252 on Windows."""
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
 def main():
     if len(sys.argv) < 3:
         print(__doc__)
@@ -42,7 +49,7 @@ def main():
     # another -- for example an int8 simulation against the bf16 golden vector -- without
     # a second, subtly different comparison script.
     if cbin.endswith(".json"):
-        C = json.load(open(cbin))
+        C = load_json(cbin)
         c = np.array(C["logits_bits"], dtype=np.uint32).view(np.float32)
     else:
         C = {}
@@ -50,7 +57,7 @@ def main():
             print("INVALID INPUT: logit dump is not a whole number of float32 values")
             return 1
         c = np.fromfile(cbin, dtype=np.float32)
-    R = json.load(open(refp))
+    R = load_json(refp)
     r = np.array(R["logits_bits"], dtype=np.uint32).view(np.float32)
 
     if any(v.ndim != 1 or v.size == 0 or not np.isfinite(v).all() for v in (c, r)):
@@ -76,7 +83,7 @@ def main():
         crun = os.path.join(os.path.dirname(os.path.abspath(cbin)), "c_run.json")
     if crun is not None and ref_ids is not None and os.path.exists(crun):
         try:
-            c_ids = json.load(open(crun)).get("prompt_ids")
+            c_ids = load_json(crun).get("prompt_ids")
         except Exception:
             c_ids = None
         if c_ids is not None:
