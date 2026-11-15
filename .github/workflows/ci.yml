@@ -61,9 +61,12 @@ jobs:
   # A separate job rather than a matrix leg: the toolchain step is brew rather than apt,
   # nproc does not exist on macOS, and Apple Clang ships no OpenMP runtime, so the flags
   # the Makefile has to discover are exactly the ones this job exists to check.
+  # macos-15, not macos-14: GitHub retired the macos-14 image ("The configuration
+  # 'macos-14-arm64-us-default' is not supported"), and a job that cannot be scheduled
+  # shows up as cancelled, which reads like a flake rather than a missing platform.
   build-and-test-macos:
-    name: build + test (macos-14, apple clang)
-    runs-on: macos-14
+    name: build + test (macos-15, apple clang)
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v7
 
