@@ -253,6 +253,8 @@ if(K3_PYTHON)
            COMMAND ${K3_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tests/unit/test_budget_coverage.py)
   add_test(NAME tokenizer_file_selection
            COMMAND ${K3_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tests/unit/test_tok_paths.py)
+  add_test(NAME cache_replay_input_integrity
+           COMMAND ${K3_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tests/unit/test_sim_trace.py)
   add_test(NAME partial_shards
            COMMAND ${CMAKE_COMMAND} -DPYTHON=${K3_PYTHON}
                    -DFIXTURES=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures
