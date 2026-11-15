@@ -122,6 +122,9 @@ def main():
     routed_params = 0
     routed_bytes = 0
     per_layer_expert_bytes = collections.Counter()
+    expert_parts = collections.defaultdict(set)
+    expert_sizes = collections.Counter()
+    observed_layers = set()
     kda_layers, mla_layers = set(), set()
 
     for fp in files:
@@ -142,6 +145,9 @@ def main():
             cnt_class[c] += 1
             by_dtype[e["dtype"]] += nb
 
+            layer = re.search(r"layers\.(\d+)\.", name)
+            if layer:
+                observed_layers.add(int(layer.group(1)))
             m = re.search(r"layers\.(\d+)\.self_attn\.(\w+)", name)
             if m:
                 # A KDA layer has A_log and conv1d weights; an MLA layer has kv_a_proj.
@@ -157,13 +163,22 @@ def main():
                 lm = re.search(r"layers\.(\d+)\.", name)
                 if lm:
                     per_layer_expert_bytes[int(lm.group(1))] += nb
+                expert = re.search(r"layers\.(\d+)\.block_sparse_moe\.experts\.(\d+)\.(.+)$", name)
+                if expert:
+                    key = (int(expert.group(1)), int(expert.group(2)))
+                    expert_parts[key].add(expert.group(3))
+                    expert_sizes[key] += nb
+
+    if not total:
+        print("no tensor bytes present; no hardware estimate is available")
+        return 1
 
     print("%-42s %8s  %12s   %s" % ("CLASS", "TENSORS", "BYTES", "SHARE"))
     print("-" * 82)
     for c, b in by_class.most_common():
         print("%-42s %8d  %12s   %5.2f%%" % (c, cnt_class[c], human(b), 100.0 * b / total))
     print("-" * 82)
-    print("%-42s %8d  %12s   100.00%%" % ("TOTAL CHECKPOINT", ntensor, human(total)))
+    print("%-42s %8d  %12s   100.00%%" % ("CHECKPOINT BYTES PRESENT", ntensor, human(total)))
 
     print("\nby dtype:")
     for d, b in by_dtype.most_common():
@@ -179,41 +194,52 @@ def main():
     print("  resident (text path, must stay in RAM) : %s" % human(resident))
     print("  streamable (routed experts, from NVMe) : %s" % human(stream))
     print("  vision tower (text-only inference)     : %s" % human(vision))
-    print("  full checkpoint on disk                : %s" % human(total))
+    print("  checkpoint bytes in shards present     : %s" % human(total))
 
     print("\nrouted experts, measured:")
     print("  parameters            : %s" % format(routed_params, ","))
     print("  bytes                 : %s" % human(routed_bytes))
-    print("  bytes per parameter   : %.6f  (MXFP4 predicts %.6f)"
-          % (routed_bytes / routed_params, MXFP4_BYTES_PER_PARAM))
+    if routed_params:
+        print("  bytes per parameter   : %.6f  (MXFP4 predicts %.6f)"
+              % (routed_bytes / routed_params, MXFP4_BYTES_PER_PARAM))
+    else:
+        print("  bytes per parameter   : unavailable (no packed routed weights present)")
     nlayers_moe = len(per_layer_expert_bytes)
     if nlayers_moe:
         per = sorted(set(per_layer_expert_bytes.values()))
         print("  MoE layers            : %d" % nlayers_moe)
         print("  bytes per MoE layer   : %s%s"
               % (human(per[0]), "" if len(per) == 1 else "  (VARIES: %d distinct)" % len(per)))
-        nexp = 896
-        print("  bytes per expert      : %s  (%d experts per layer)"
-              % (human(per[0] / nexp), nexp))
+        print("  observed expert count : %d observed experts" % len(expert_parts))
 
     print("\nlayer map from the checkpoint itself:")
     print("  layers with A_log (KDA)      : %d" % len(kda_layers))
     print("  layers with kv_a/kv_b (MLA)  : %d" % len(mla_layers))
     both = kda_layers & mla_layers
     print("  layers claiming both         : %d%s" % (len(both), "  <-- WRONG" if both else ""))
-    allmoe = sorted(per_layer_expert_bytes)
-    if allmoe:
-        missing = [i for i in range(93) if i not in per_layer_expert_bytes]
-        print("  layers WITHOUT routed experts: %s (expect [0], the dense layer)" % missing)
+    if observed_layers:
+        missing = sorted(observed_layers - set(per_layer_expert_bytes))
+        print("  observed layers without routed tensors: %s" % missing)
 
-    print("\nwhat this means for hardware:")
+    required = {f"{matrix}.{kind}" for matrix in ("w1", "w2", "w3")
+                for kind in ("weight_packed", "weight_scale")}
+    if not expert_parts or any(not required.issubset(parts) for parts in expert_parts.values()):
+        print("\nno complete routed expert set: incomplete/absent expert coverage; "
+              "cache capacity cannot be projected")
+        return 0
+    if len(set(expert_sizes.values())) != 1:
+        print("\nobserved experts have different sizes; cache capacity cannot be projected")
+        return 0
+    expert_count = len(expert_parts)
+    expert_bytes = next(iter(expert_sizes.values()))
+    print("\nwhat this means for hardware (shards present only):")
     for ram in (32, 48, 64, 96, 128, 192, 256):
         fits = ram * 1e9 - resident
-        n = int(fits / (routed_bytes / (nlayers_moe * 896))) if fits > 0 else 0
-        pct = 100.0 * n * (routed_bytes / (nlayers_moe * 896)) / stream if n > 0 else 0.0
+        n = min(expert_count, int(fits / expert_bytes)) if fits > 0 else 0
+        pct = 100.0 * n / expert_count
         print("  %3d GB RAM -> %s for experts, about %6d of %d cached (%.1f%%)"
               % (ram, human(fits) if fits > 0 else "  DOES NOT FIT",
-                 max(n, 0), nlayers_moe * 896, pct))
+                 max(n, 0), expert_count, pct))
     return 0
 
 
