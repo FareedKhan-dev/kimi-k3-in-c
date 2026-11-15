@@ -346,6 +346,10 @@ test: $(CLI_BIN) $(TEST_BINS)
 	  if command -v $(PYTHON) >/dev/null 2>&1; then \
 	      $(PYTHON) tests/unit/test_sim_trace.py; \
 	  else echo "  NOT RUN: no $(PYTHON) on PATH"; fi
+	@echo "== quantization source ownership =="; \
+	  if command -v $(PYTHON) >/dev/null 2>&1; then \
+	      $(PYTHON) tests/unit/test_int8_source.py; \
+	  else echo "  NOT RUN: no $(PYTHON) on PATH"; fi
 	@echo "== partial download contract =="; \
 	  if ! command -v $(PYTHON) >/dev/null 2>&1; then \
 	      echo "  NOT RUN: no $(PYTHON) on PATH. tools/layers_to_shards.py backs"; \
