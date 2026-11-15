@@ -6,6 +6,7 @@
 |---|---|
 | [QUICKSTART.md](QUICKSTART.md) | from nothing to generated text |
 | [TUNING.md](TUNING.md) | choosing a memory budget, one decision dominates |
+| [TERMUX.md](TERMUX.md) | building and running the weightless suite on Android ARM64 |
 
 ## Reference
 
