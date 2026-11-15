@@ -158,3 +158,16 @@ if (k3_expert_drops) return 1;   /* check before trusting the output */
 ```
 
 See `src/cli/k3_run.c` for the complete path, including trunk streaming and the KV cache.
+
+### Access-trace memory
+
+The library retains its default request tracing. Call
+`k3_cache_set_trace(&cache, 0)` to discard and disable the growing request buffer;
+the bounded histogram and cache serving remain active. Call with `1` to record
+subsequent requests again. The CLI enables request tracing only when
+`--dump-cache-trace` is supplied, so ordinary inference does not retain this
+unbounded diagnostic history.
+
+Change trace collection only between cache requests; the toggle is not a
+synchronization primitive for concurrent cache use. Rebuild consumers when the
+public cache structure changes.
