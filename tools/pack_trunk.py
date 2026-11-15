@@ -30,6 +30,7 @@ import json
 import os
 import struct
 import sys
+import tempfile
 import time
 
 CHUNK = 64 << 20
@@ -43,12 +44,7 @@ def shard_header(path):
     return hdr, 8 + n
 
 
-def main():
-    if len(sys.argv) < 3:
-        print("usage: pack_trunk.py <shard_dir> <out_dir> [n_layers]")
-        return 2
-    src, out = sys.argv[1], sys.argv[2]
-    nlayers = int(sys.argv[3]) if len(sys.argv) > 3 else 93
+def pack(src, out, nlayers):
     os.makedirs(out, exist_ok=True)
 
     shard_names = sorted(fn for fn in os.listdir(src) if fn.endswith(".safetensors"))
@@ -163,6 +159,33 @@ def main():
     print("\nwrote %s: %.2f GB across %d layers" % (outp, total / 1e9, nlayers))
     print("largest layer run: %.3f GB  <- the streaming slot size" % (big / 1e9))
     print("wrote %s" % os.path.join(out, "trunk.json"))
+    return 0
+
+
+def main():
+    if len(sys.argv) < 3:
+        print("usage: pack_trunk.py <shard_dir> <out_dir> [n_layers]")
+        return 2
+    src, out = sys.argv[1], sys.argv[2]
+    try:
+        nlayers = int(sys.argv[3]) if len(sys.argv) > 3 else 93
+    except ValueError:
+        print("n_layers must be a positive integer", file=sys.stderr)
+        return 2
+    if nlayers < 1:
+        print("n_layers must be a positive integer", file=sys.stderr)
+        return 2
+    os.makedirs(out, exist_ok=True)
+    # Complete and validate the copy before replacing either prior artifact file.
+    with tempfile.TemporaryDirectory(prefix=".k3-pack-", dir=out) as staging:
+        rc = pack(src, staging, nlayers)
+        if rc:
+            return rc
+        # These are separate file replacements, not an atomic two-file transaction.
+        # Do not publish concurrently with readers/writers of this output directory.
+        os.replace(os.path.join(staging, "trunk.bin"), os.path.join(out, "trunk.bin"))
+        os.replace(os.path.join(staging, "trunk.json"), os.path.join(out, "trunk.json"))
+    print("published packed trunk in %s" % out)
     return 0
 
 

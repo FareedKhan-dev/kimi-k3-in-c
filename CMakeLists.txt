@@ -257,6 +257,8 @@ if(K3_PYTHON)
            COMMAND ${K3_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tests/unit/test_sim_trace.py)
   add_test(NAME quantization_source_ownership
            COMMAND ${K3_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tests/unit/test_int8_source.py)
+  add_test(NAME packed_output_staging
+           COMMAND ${K3_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tests/unit/test_pack_staging.py)
   add_test(NAME partial_shards
            COMMAND ${CMAKE_COMMAND} -DPYTHON=${K3_PYTHON}
                    -DFIXTURES=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures
