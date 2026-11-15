@@ -548,11 +548,18 @@ void k3_cache_set_trace(K3Cache *c, int enabled)
 
 int k3_cache_dump_trace(const K3Cache *c, const char *path)
 {
-    if (!c->trace || c->ntrace == 0) return -1;
+    /* Nothing was being recorded: there is no trace to write, empty or otherwise. */
+    if (!c->trace_enabled) return -1;
+    /* Recorded, but empty, is a result rather than a failure. A run that stops before
+     * the first routed layer (--layers 1) asks the cache for nothing, and since a failed
+     * dump now fails the run with exit 3, refusing here would turn
+     * `--layers 1 --dump-cache-trace` into an error. The file is written with zero
+     * requests; tools/sim_cache.py refuses to replay an empty one, by name. */
     FILE *f = fopen(path, "wb");
     if (!f) return -1;
-    const size_t n = fwrite(c->trace, sizeof(int32_t), (size_t)c->ntrace, f);
-    int failed = n != (size_t)c->ntrace;
+    const size_t want = c->trace ? (size_t)c->ntrace : 0;
+    const size_t n = want ? fwrite(c->trace, sizeof(int32_t), want, f) : 0;
+    int failed = n != want;
     if (k3_output_close(f) != 0) failed = 1;
     if (failed) return -1;
     printf("wrote %s: %lld requests (%.1f KB)\n",

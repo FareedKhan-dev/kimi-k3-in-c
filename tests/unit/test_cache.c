@@ -173,6 +173,23 @@ int main(int argc, char **argv)
         for (int i = 0; i < NE; i++) requests += cache.hist[i];
         ck(requests == 1003 && cache.hits + cache.misses == 1003,
            "trace toggles preserve histogram and counts", "1003 model requests");
+
+        /* A dump is refused only when nothing was being recorded. An enabled trace
+         * with no requests in it is a result: a run that stops before the first routed
+         * layer writes an empty file instead of failing its --dump-cache-trace. The
+         * requests below repopulate the trace, so the full-device check later still
+         * has bytes to fail on. */
+        const char *tp = "k3_test_empty_trace.bin";
+        k3_cache_set_trace(&cache, 0);
+        ck(k3_cache_dump_trace(&cache, tp) != 0, "a disabled trace is not dumped", NULL);
+        k3_cache_set_trace(&cache, 1);
+        long tsz = -1;
+        if (k3_cache_dump_trace(&cache, tp) == 0) {
+            FILE *tf = fopen(tp, "rb");
+            if (tf) { fseek(tf, 0, SEEK_END); tsz = ftell(tf); fclose(tf); }
+        }
+        remove(tp);
+        ck(tsz == 0, "an enabled but empty trace dumps as an empty file", NULL);
     }
 
     /* ---- 1+3: serial path, every expert, under eviction pressure ---- */
