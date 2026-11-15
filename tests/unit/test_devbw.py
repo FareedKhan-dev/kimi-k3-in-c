@@ -16,14 +16,17 @@ spec.loader.exec_module(devbw)
 
 class DeviceBandwidth(unittest.TestCase):
     def measure(self, returns, size=16, qd=1):
-        with tempfile.NamedTemporaryFile() as f:
-            f.write(b"x" * size)
-            f.flush()
+        # A closed file in a private directory, not an open NamedTemporaryFile: the
+        # tool reopens the path by name, which Windows refuses while the creating
+        # handle is still open, so the test failed there before measuring anything.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "device.bin"
+            path.write_bytes(b"x" * size)
             with patch.object(devbw, "SZ", 16), patch.object(devbw, "N", 1), \
                  patch.object(devbw.os, "O_DIRECT", 0, create=True), \
                  patch.object(devbw.os, "preadv", side_effect=returns, create=True), \
                  patch.object(devbw.time, "perf_counter", side_effect=[1.0, 3.0]):
-                return devbw.measure(f.name, qd)
+                return devbw.measure(str(path), qd)
 
     def test_eof_is_not_full_throughput(self):
         with self.assertRaisesRegex(OSError, "short read"):
