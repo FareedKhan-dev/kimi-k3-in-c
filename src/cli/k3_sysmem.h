@@ -318,9 +318,11 @@ static double k3_meminfo_field_at(const char *meminfo, const char *field)
 }
 
 /* The Linux probe against explicit paths, so a test can point it at a fake tree.
- * Returns 0 when something was learned (out->known), -1 when nothing was. */
-static int k3_mem_available_at(const char *meminfo, const char *proc_cgroup,
-                               const char *cgroup_root, K3MemAvail *out)
+ * Returns 0 when something was learned (out->known), -1 when nothing was. Inline
+ * because only the Linux branch of k3_mem_probe() and test_mem call it: as a plain
+ * static it is an unused-function warning in every Darwin and Windows build. */
+static inline int k3_mem_available_at(const char *meminfo, const char *proc_cgroup,
+                                      const char *cgroup_root, K3MemAvail *out)
 {
     memset(out, 0, sizeof *out);
     out->host = -1.0; out->cgroup = -1.0; out->cgroup_limit = -1.0;
@@ -343,7 +345,14 @@ static int k3_mem_available_at(const char *meminfo, const char *proc_cgroup,
              * or above 2^62 is the kernel saying "none", not a real limit. */
             const double v1_unlimited = 4611686018427387904.0;
             char sub[600];
-            snprintf(sub, sizeof sub, "%s/memory", cgroup_root);
+            const int sn = snprintf(sub, sizeof sub, "%s/memory", cgroup_root);
+            if (sn < 0 || (size_t)sn >= sizeof sub) {
+                /* A truncated root is some other directory, and probing it would read
+                 * a limit that does not apply: fail closed rather than guess. */
+                snprintf(out->detail, sizeof out->detail,
+                         "cgroup root path is too long to probe: %.200s", cgroup_root);
+                goto closed;
+            }
             int w = k3_mem_walk(sub, v1, "memory.limit_in_bytes", "memory.usage_in_bytes",
                                 v1_unlimited, &remaining, out);
             if (w == 0)
