@@ -404,7 +404,25 @@ int k3_cache_init(K3Cache *c, const K3St *st, const K3Cfg *cfg, int64_t budget_b
         if (k3_is_dense(cfg, L)) continue;
         if (k3_expert_ref(st, L, 0, &probe) == 0) found = 1;
     }
-    if (!found) { fprintf(stderr, "k3_cache: no routed experts in this shard set\n"); return -1; }
+    if (!found) {
+        /* A `download-model.sh --layers 1` shard set holds layer 0 only, and layer 0
+         * is dense, so there is no expert to size a slot from. That run never asks
+         * the cache for anything, so refusing to start here would turn the documented
+         * one-layer development path into a dead end. Build an EMPTY cache instead:
+         * zero slots, no arena, and a key table that answers every lookup with -1, so a
+         * run that does reach a routed layer fails at the request with the missing
+         * tensor named by k3_st, not here with a shard set that may be exactly as
+         * ordered. */
+        fprintf(stderr, "k3_cache: no routed experts in this shard set; the expert cache "
+                        "is empty. Only a run that stops before the first routed layer "
+                        "(--layers 1) can succeed.\n");
+        const size_t nkey = (size_t)c->n_layers * c->n_experts;
+        c->slot_of = (int32_t *)malloc(nkey * sizeof(int32_t));
+        c->hist    = (uint32_t *)calloc(nkey, sizeof(uint32_t));
+        if (!c->slot_of || !c->hist) { k3_cache_free(c); return -1; }
+        for (size_t i = 0; i < nkey; i++) c->slot_of[i] = -1;
+        return 0;
+    }
     /* Room for an O_DIRECT read widened outward to 4096 boundaries at both ends. */
     /* Round the SLOT STRIDE up to the O_DIRECT alignment, not just the arena base.
      *
