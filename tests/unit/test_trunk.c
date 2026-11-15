@@ -685,7 +685,11 @@ int main(void)
         if (!made) { fprintf(stderr, "CreateDirectoryA failed\n"); return 2; }
     }
 #else
-    snprintf(tmpdir, sizeof tmpdir, "/tmp/k3_test_trunk_XXXXXX");
+    {   /* TMPDIR first: Termux has no writable /tmp, and sets TMPDIR to one it does */
+        const char *base = getenv("TMPDIR");
+        if (!base || !*base) base = "/tmp";
+        snprintf(tmpdir, sizeof tmpdir, "%s/k3_test_trunk_XXXXXX", base);
+    }
     if (!mkdtemp(tmpdir)) {
         perror("mkdtemp"); return 2;
     }

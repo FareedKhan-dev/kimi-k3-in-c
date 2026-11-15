@@ -21,6 +21,28 @@ static void expect_text(const char *got, const char *want, const char *what)
     else { ok(0, what); fprintf(stderr, "want: %s\ngot : %s\n", want, got); }
 }
 
+/* Where the history fixture goes. A literal "/tmp" is a POSIX assumption: a native
+ * Windows build reads it as C:\tmp, which a normal machine does not have, and Termux
+ * has no writable /tmp at all. Both failed four history checks here, and CI never saw
+ * it because this test needs the released tokenizer to run at all. */
+static const char *tmp_base(void)
+{
+#if defined(_WIN32)
+    static const char *names[] = { "TEMP", "TMP" };
+#else
+    static const char *names[] = { "TMPDIR" };
+#endif
+    for (size_t i = 0; i < sizeof names / sizeof *names; i++) {
+        const char *v = getenv(names[i]);
+        if (v && *v) return v;
+    }
+#if defined(_WIN32)
+    return ".";
+#else
+    return "/tmp";
+#endif
+}
+
 static void emit_ids(const int *ids, int n)
 {
     for (int i = 0; i < n; i++) printf("%s%d", i ? "," : "", ids[i]);
@@ -223,7 +245,9 @@ int main(int argc, char **argv)
     ok(k3_chat_parse_assistant_opts(&tok, &tmpl, &nothink, raw, rn, &parsed, err, sizeof err) != 0,
        "thinking=False parser rejects a thinking completion (control ids in the response)");
 
-    char path[] = "/tmp/k3_chat_history_XXXXXX"; int fd = mkstemp(path); if (fd >= 0) close(fd);
+    char path[1024];
+    snprintf(path, sizeof path, "%s/k3_chat_history_XXXXXX", tmp_base());
+    int fd = mkstemp(path); if (fd >= 0) close(fd);
     ok(fd >= 0 && k3_chat_history_save(&h, path, err, sizeof err) == 0, "atomic JSONL history write");
     K3ChatHistory loaded; k3_chat_history_init(&loaded);
     ok(k3_chat_history_load(&loaded, path, err, sizeof err) == 0 && loaded.n == 2 && !strcmp(loaded.v[0].content, "You are helpful."), "JSONL history round trip");
