@@ -143,6 +143,14 @@ static inline void k3_tok_load(Tok *T, const char *files_dir)
     int vc = 1; while (vc < 163584 * 2) vc <<= 1;
     hm_init(&T->vocab, vc);
 
+    /* Which ids are taken, by a rank or an added token. A rank seen twice, or a gap,
+     * is a corrupt or truncated file, and neither fails on its own: hm_put and the
+     * id2str store both overwrite, and tok_decode skips an id it has no string for. A
+     * download cut inside the last rank field ("... 163583" -> "... 16") lands on an
+     * existing rank and silently replaces it. */
+    unsigned char *taken = (unsigned char *)calloc((size_t)T->n_ids, 1);
+    if (!taken) { fprintf(stderr, "k3_tok: OOM sizing %d ids\n", T->n_ids); exit(1); }
+
     int nrank = 0, maxrank = -1;
     long i = 0;
     while (i < nbuf) {
@@ -161,30 +169,59 @@ static inline void k3_tok_load(Tok *T, const char *files_dir)
             exit(1);
         }
         int blen = (int)(sp - ls);
-        int rank = atoi(buf + sp + 1);
-        if (rank < 0 || rank >= T->n_ids) {
-            fprintf(stderr, "k3_tok: rank %d out of range at line %d\n", rank, nrank);
+        /* Digits only, up to the end of the line. atoi read "12x" as 12 and "" as 0. */
+        long rank = 0, d = sp + 1;
+        if (d >= le) {
+            fprintf(stderr, "k3_tok: tiktoken.model line %d has an empty rank\n", nrank);
             exit(1);
         }
+        for (; d < le; d++) {
+            if (buf[d] < '0' || buf[d] > '9' || rank >= T->n_ids) break;
+            rank = rank * 10 + (buf[d] - '0');
+        }
+        if (d < le || rank >= T->n_ids) {
+            fprintf(stderr, "k3_tok: bad rank field '%.*s' at line %d\n",
+                    (int)(le - sp - 1 > 32 ? 32 : le - sp - 1), buf + sp + 1, nrank);
+            exit(1);
+        }
+        if (taken[rank]) {
+            fprintf(stderr, "k3_tok: rank %ld appears twice (line %d); the file is"
+                    " corrupt or truncated\n", rank, nrank);
+            exit(1);
+        }
+        taken[rank] = 1;
 
         unsigned char raw[512];
         if (blen > (int)((sizeof raw) * 4 / 3)) {
-            fprintf(stderr, "k3_tok: implausibly long token at rank %d\n", rank); exit(1);
+            fprintf(stderr, "k3_tok: implausibly long token at rank %ld\n", rank); exit(1);
         }
         int rn = k3_b64(buf + ls, blen, raw);
-        if (rn < 0) { fprintf(stderr, "k3_tok: bad base64 at rank %d\n", rank); exit(1); }
+        if (rn <= 0) { fprintf(stderr, "k3_tok: bad base64 at rank %ld\n", rank); exit(1); }
 
         char *key = (char *)malloc((size_t)2 * rn + 1);
-        if (!key) { fprintf(stderr, "k3_tok: OOM on token %d\n", rank); exit(1); }
+        if (!key) { fprintf(stderr, "k3_tok: OOM on token %ld\n", rank); exit(1); }
         int kl = k3_bytelevel(T, raw, rn, key);
 
-        hm_put(&T->vocab, key, kl, rank);
+        /* Two ranks for the same bytes leave one unreachable from the encoder. */
+        int prev = hm_get(&T->vocab, key, kl);
+        if (prev >= 0) {
+            fprintf(stderr, "k3_tok: ranks %d and %ld encode the same bytes\n", prev, rank);
+            exit(1);
+        }
+        hm_put(&T->vocab, key, kl, (int)rank);
         T->id2str[rank] = key;                   /* decode reverses this via cp2byte */
-        if (rank > maxrank) maxrank = rank;
+        if (rank > maxrank) maxrank = (int)rank;
         nrank++;
     }
     free(buf);
     if (nrank == 0) { fprintf(stderr, "k3_tok: tiktoken.model is empty\n"); exit(1); }
+    /* No duplicates, so nrank == maxrank + 1 iff the ranks are exactly 0..maxrank. */
+    if (nrank != maxrank + 1) {
+        int gap = 0; while (taken[gap]) gap++;
+        fprintf(stderr, "k3_tok: tiktoken.model has %d ranks up to %d; rank %d is missing\n",
+                nrank, maxrank, gap);
+        exit(1);
+    }
 
     /* ---- specials ---- */
     snprintf(path, sizeof path, "%s/tokenizer_config.json", files_dir);
@@ -209,6 +246,7 @@ static inline void k3_tok_load(Tok *T, const char *files_dir)
     T->sp  = (Special *)calloc((size_t)(T->nsp ? T->nsp : 1), sizeof(Special));
     if (!T->sp) { fprintf(stderr, "k3_tok: OOM on %d specials\n", T->nsp); exit(1); }
 
+    int minadded = T->n_ids;
     for (int k = 0; k < adt->len; k++) {
         /* keys are the ids, as strings: {"163584": {"content": "[BOS]", ...}} */
         int id = atoi(adt->keys[k]);
@@ -221,6 +259,15 @@ static inline void k3_tok_load(Tok *T, const char *files_dir)
         if (id < 0 || id >= T->n_ids) {
             fprintf(stderr, "k3_tok: added token id %d out of range\n", id); exit(1);
         }
+        /* An added token on a rank id replaces that rank's decode string while the
+         * encoder still emits it for the rank's bytes. */
+        if (taken[id]) {
+            fprintf(stderr, "k3_tok: added token id %d is already taken by a %s\n", id,
+                    id <= maxrank ? "rank" : "previous added token");
+            exit(1);
+        }
+        taken[id] = 1;
+        if (id < minadded) minadded = id;
         T->sp[k].str = jc->str;                  /* json_parse strings are independent */
         T->sp[k].len = (int)strlen(jc->str);
         T->sp[k].id  = id;
@@ -229,6 +276,16 @@ static inline void k3_tok_load(Tok *T, const char *files_dir)
         jval *sf = json_get(e, "special");
         if (sf && sf->t == J_BOOL && sf->boolean) T->id_special[id] = 1;
     }
+    /* The added ids start immediately after the last rank. A tiktoken.model cut at a
+     * line boundary passes every per-line check above, and this is the one place the
+     * missing tail shows: a gap between the last rank and the first added token. */
+    if (T->nsp > 0 && minadded != maxrank + 1) {
+        fprintf(stderr, "k3_tok: ranks end at %d but added tokens start at %d;"
+                " tiktoken.model looks truncated\n", maxrank, minadded);
+        exit(1);
+    }
+    free(taken);
+
     /* longest match first, so "<|end_of_msg|>" wins over any prefix of it */
     qsort(T->sp, (size_t)T->nsp, sizeof(Special), cmp_sp_len);
 

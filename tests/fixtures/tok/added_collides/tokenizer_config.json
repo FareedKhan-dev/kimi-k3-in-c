@@ -1,0 +1,12 @@
+{
+ "added_tokens_decoder": {
+  "100": {
+   "content": "[BOS]",
+   "special": true
+  },
+  "260": {
+   "content": "<|im_end|>",
+   "special": true
+  }
+ }
+}
