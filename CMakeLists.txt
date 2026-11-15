@@ -265,6 +265,8 @@ if(K3_PYTHON)
            COMMAND ${K3_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tests/unit/test_conform_range.py)
   add_test(NAME conformance_paths
            COMMAND ${K3_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tests/unit/test_conform_paths.py)
+  add_test(NAME fresh_conformance_receipts
+           COMMAND ${K3_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tests/unit/test_conform_receipts.py)
   add_test(NAME partial_shards
            COMMAND ${CMAKE_COMMAND} -DPYTHON=${K3_PYTHON}
                    -DFIXTURES=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures
