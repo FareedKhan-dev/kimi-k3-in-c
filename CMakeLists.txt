@@ -247,6 +247,8 @@ if(K3_PYTHON)
            COMMAND ${K3_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tests/unit/test_qdq_group.py)
   add_test(NAME doctor_probe_ownership
            COMMAND ${K3_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tests/unit/test_doctor_probe.py)
+  add_test(NAME benchmark_repetitions
+           COMMAND ${K3_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tests/unit/test_benchmark_repetitions.py)
   add_test(NAME partial_shards
            COMMAND ${CMAKE_COMMAND} -DPYTHON=${K3_PYTHON}
                    -DFIXTURES=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures

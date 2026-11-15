@@ -23,6 +23,12 @@ REPS="${5:-3}"
 IDS=1008,10484,318,15383,387
 GEN=8
 
+# An empty seq loop must never certify identical output at every rung/split.
+if ! [[ "$REPS" =~ ^0*[1-9][0-9]*$ ]]; then
+    echo "repetitions must be a positive integer" >&2
+    exit 2
+fi
+
 command -v systemd-run >/dev/null 2>&1 || {
     echo "systemd-run not found; a genuine memory ceiling is required. See memory-ladder.sh."
     exit 1
