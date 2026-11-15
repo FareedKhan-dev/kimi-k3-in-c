@@ -241,6 +241,8 @@ if(K3_PYTHON)
                    ${K3_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tests/unit/test_cli_numbers.py)
   add_test(NAME device_benchmark_integrity
            COMMAND ${K3_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tests/unit/test_devbw.py)
+  add_test(NAME logit_comparator_evidence
+           COMMAND ${K3_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tests/unit/test_cmp_logits.py)
   add_test(NAME partial_shards
            COMMAND ${CMAKE_COMMAND} -DPYTHON=${K3_PYTHON}
                    -DFIXTURES=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures

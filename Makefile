@@ -318,6 +318,10 @@ test: $(CLI_BIN) $(TEST_BINS)
 	  if command -v $(PYTHON) >/dev/null 2>&1; then \
 	      $(PYTHON) tests/unit/test_devbw.py; \
 	  else echo "  NOT RUN: no $(PYTHON) on PATH"; fi
+	@echo "== logit comparator evidence contract =="; \
+	  if command -v $(PYTHON) >/dev/null 2>&1; then \
+	      $(PYTHON) tests/unit/test_cmp_logits.py; \
+	  else echo "  NOT RUN: no $(PYTHON) on PATH"; fi
 	@echo "== partial download contract =="; \
 	  if ! command -v $(PYTHON) >/dev/null 2>&1; then \
 	      echo "  NOT RUN: no $(PYTHON) on PATH. tools/layers_to_shards.py backs"; \
