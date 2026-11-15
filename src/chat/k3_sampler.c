@@ -81,11 +81,17 @@ int k3_sampler_next(K3Sampler *s, const float *logits, int n, int greedy, int *o
     /* Top-k first: only the K most probable ids stay eligible for the nucleus
      * below. Disabled (<= 0) or wider than the vocabulary means the whole
      * sorted list, exactly as before. A top-p nucleus is always a prefix of
-     * the same order, so the two truncations commute by construction. */
+     * the same order, with top-p measured relative to the surviving mass. */
     int nw = n;
     if (s->top_k > 0 && s->top_k < nw) nw = s->top_k;
+    double mass = 1.0;
+    if (nw < n) {
+        mass = 0.0;
+        for (int i = 0; i < nw; i++) mass += s->prob[s->ids[i]];
+    }
     double keep = 0.0; int nk = 0;
-    while (nk < nw && keep < s->top_p) keep += s->prob[s->ids[nk++]];
+    while (nk < nw && keep < s->top_p * mass)
+        keep += s->prob[s->ids[nk++]];
     if (!nk) nk = 1;
     double r = unit(s) * keep, acc = 0.0;
     for (int i = 0; i < nk; i++) { int id = s->ids[i]; acc += s->prob[id]; if (r < acc || i + 1 == nk) { *out = id; return 0; } }
