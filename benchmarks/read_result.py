@@ -24,12 +24,15 @@ def fields(result, prompt, generated):
         raise ValueError("seconds_per_token must be finite and positive")
     if isinstance(rss, bool) or not math.isfinite(rss) or rss <= 0:
         raise ValueError("peak_rss_bytes must be finite and positive")
-    read = 0
     for name in ("expert_bytes_read", "trunk_bytes_read", "embedding_bytes_read", "lm_head_bytes_read"):
         value = result[name]
         if type(value) is not int or value < 0:
             raise ValueError(name + " must be a non-negative integer")
-        read += value
+    # gb_read is ROUTED EXPERT bytes, as it always was: the log line these harnesses
+    # used to grep is the expert cache's own, and docs/data/memory-ladder.tsv publishes
+    # 25.83 GB/token under that name with the 108.81 GB trunk counted separately. A
+    # replicated campaign has to produce the same metric to be comparable with it.
+    read = result["expert_bytes_read"]
     return f"{seconds:.6f}\t{rss / 1e9:.6f}\t{read / 1e9:.6f}\t" + ",".join(map(str, ids))
 
 

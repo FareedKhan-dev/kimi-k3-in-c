@@ -25,10 +25,12 @@ def receipt():
 
 
 class ReceiptFields(unittest.TestCase):
-    def test_exact_metrics_include_all_io_sources(self):
+    def test_gb_read_is_routed_expert_bytes(self):
+        # trunk, embedding and lm_head bytes are validated but are not gb_read: the
+        # published ladder's gb_read is the expert cache's figure alone.
         value = receipt()
         self.assertEqual(reader.fields(value, value["prompt_ids"], 8),
-                         "1.500000\t2.000000\t10.000000\t0,1,2,3,4,5,6,7")
+                         "1.500000\t2.000000\t1.000000\t0,1,2,3,4,5,6,7")
 
     def test_invalid_results_cannot_enter_table(self):
         changes = [{"seconds_per_token": float("nan")}, {"peak_rss_bytes": 0},
