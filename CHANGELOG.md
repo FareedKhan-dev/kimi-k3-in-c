@@ -7,6 +7,15 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **An expert whose E8M0 scales carried the NaN code loaded silently.** Scale byte 255 is
+  NaN by the OCP MX spec and no quantiser writes it; the kernels mapped it to zero and
+  skipped the 32-weight group, so a damaged shard ran with pieces of experts missing and
+  nothing said so. The streaming cache now scans the scale bytes of every expert as they
+  land in memory, 1 byte per 32 weights, and refuses the expert naming the shard file, the
+  tensor and the count; the run then fails the way a missing tensor fails it. The kernel
+  mapping stays as defence in depth. The 7,168 real scale bytes in `tests/fixtures/mxfp4.json`
+  range 120 to 122; the 96 released shards were not re-checked for this change.
+
 - **The trunk report counted a prefetched layer as a hit** whenever its read finished
   before the walk bound it. On a fully streamed run of the tiny checkpoint, every one of
   the 156 layer binds was a real read ("reads 156 against 156 the walk owes"), and the

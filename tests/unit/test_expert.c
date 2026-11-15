@@ -258,6 +258,7 @@ int main(int argc, char **argv)
     printf("\n%-18s %8s %10s %12s %12s\n", "ACCESS PATTERN", "EXPERTS", "SECONDS", "MB/s", "EXPERTS/s");
     printf("%s\n", "----------------------------------------------------------------");
     double rand_cold_mbs = 0.0;
+    int64_t nan_scales = 0, scanned = 0;
     for (unsigned k = 0; k < sizeof runs / sizeof *runs; k++) {
         if (runs[k].cold) { if (!root) continue; drop_caches(); }
         double best_t = 0.0;
@@ -267,6 +268,12 @@ int main(int argc, char **argv)
             K3ExpertRef r;
             if (k3_expert_ref(&s, layer, runs[k].order[i], &r) != 0) continue;
             bytes += k3_expert_load(&s, &r, buf);
+            /* The same scan the streaming cache applies on admission, here over real
+             * bytes: this is the gate that says the released shards never carry the
+             * E8M0 NaN code. Its cost is inside the timing on purpose; it is what a
+             * real load pays. */
+            nan_scales += k3_expert_nan_scales(&s, &r, buf, NULL, 0);
+            scanned++;
         }
         best_t = now_s() - t1;
         double mbs = (double)bytes / 1e6 / best_t;
@@ -274,6 +281,11 @@ int main(int argc, char **argv)
                runs[k].label, n, best_t, mbs, n / best_t);
         if (k == 1) rand_cold_mbs = mbs;
     }
+
+    printf("\nE8M0 scale bytes equal to 255 (NaN) across %lld expert loads: %lld%s\n",
+           (long long)scanned, (long long)nan_scales,
+           nan_scales ? "   <-- CORRUPT SHARD, the cache would refuse these" : "");
+    if (nan_scales) { free(buf); k3_st_close(&s); return 1; }
 
     /* ---- what that means per token ---- */
     if (rand_cold_mbs > 0.0) {

@@ -9,7 +9,10 @@
  *   content corruption with intact structure, flipped data bytes, or lying
  *   but in-range offsets: those read back full and silent, so this test
  *   documents the boundary of what the reader itself can catch rather than
- *   claiming to catch everything.
+ *   claiming to catch everything. One content fault IS caught, by the expert
+ *   loader rather than the reader: an E8M0 scale byte of 255, the NaN code no
+ *   quantiser writes. The last case below builds a one-expert shard with
+ *   exactly one such byte and asserts the cache refuses it by name.
  *
  * usage: test_st_faults <fixture_st_dir> <work_dir>
  */
@@ -24,6 +27,9 @@
 #include <sys/stat.h>
 #include <dirent.h>
 
+#include "k3.h"
+#include "k3_cache.h"
+#include "k3_load.h"
 #include "k3_st.h"
 
 static int g_fail = 0;
@@ -191,6 +197,94 @@ static int open_synthetic(const char *work, const char *sub, const char *header_
     const int rc = k3_st_open(&s, d);
     if (rc == 0) { *nt = s.nt; k3_st_close(&s); }
     return rc;
+}
+
+/* A one-expert shard in the real six-tensor layout, tiny: [2][64] packed and [2][4]
+ * scales per matrix. Data bytes cycle mod 251, so 255 never occurs by accident; when
+ * nan_at >= 0 that one byte is overwritten with 255. */
+#define EXP_ROWS 2
+#define EXP_PCOLS 64
+#define EXP_SCOLS (EXP_PCOLS * 2 / 32)
+#define EXP_P_BYTES (EXP_ROWS * EXP_PCOLS)
+#define EXP_S_BYTES (EXP_ROWS * EXP_SCOLS)
+#define EXP_BYTES (3 * (EXP_P_BYTES + EXP_S_BYTES))
+#define EXP_FMT "language_model.model.layers.0.block_sparse_moe.experts.0.%s.%s"
+
+static int write_expert_shard(const char *dir, int nan_at)
+{
+    static const char *W[3] = { "w1", "w2", "w3" };
+    char hdr[2048], p[2048];
+    size_t h = 0;
+    int64_t off = 0;
+    h += (size_t)snprintf(hdr + h, sizeof hdr - h, "{");
+    for (int i = 0; i < 3; i++) {
+        h += (size_t)snprintf(hdr + h, sizeof hdr - h,
+                 "\"" EXP_FMT "\":{\"dtype\":\"U8\",\"shape\":[%d,%d],"
+                 "\"data_offsets\":[%lld,%lld]},",
+                 W[i], "weight_packed", EXP_ROWS, EXP_PCOLS,
+                 (long long)off, (long long)(off + EXP_P_BYTES));
+        off += EXP_P_BYTES;
+        h += (size_t)snprintf(hdr + h, sizeof hdr - h,
+                 "\"" EXP_FMT "\":{\"dtype\":\"U8\",\"shape\":[%d,%d],"
+                 "\"data_offsets\":[%lld,%lld]}%s",
+                 W[i], "weight_scale", EXP_ROWS, EXP_SCOLS,
+                 (long long)off, (long long)(off + EXP_S_BYTES), i < 2 ? "," : "}");
+        off += EXP_S_BYTES;
+    }
+    if (h >= sizeof hdr) return -1;
+    while (h % 8) hdr[h++] = ' ';             /* 8-byte aligned body, as the writers do */
+    hdr[h] = 0;
+
+    unsigned char data[EXP_BYTES];
+    for (int i = 0; i < EXP_BYTES; i++) data[i] = (unsigned char)(i % 251);
+    if (nan_at >= 0 && nan_at < EXP_BYTES) data[nan_at] = 255;
+
+    mkdir(dir, 0755);
+    if (snprintf(p, sizeof p, "%s/model-00001-of-00001.safetensors", dir) >= (int)sizeof p)
+        return -1;
+    return write_synthetic_shard(p, hdr, data, sizeof data);
+}
+
+/* Open the shard, read the expert both straight and through the cache (batch
+ * prefetch then get, and a fresh cache's serial get), and report what the scan said.
+ * n255 receives the count the scan returned, why[] its message, serial and batch the
+ * get() results (0 = served). Returns 0 when the harness itself worked. */
+static int probe_expert_shard(const char *dir, long long *n255, char *why, size_t cap,
+                              int *serial, int *batch)
+{
+    K3St s; memset(&s, 0, sizeof s);
+    if (k3_st_open(&s, dir) != 0) return -1;
+    K3ExpertRef r; memset(&r, 0, sizeof r);
+    if (k3_expert_ref(&s, 0, 0, &r) != 0) { k3_st_close(&s); return -1; }
+    unsigned char *buf = (unsigned char *)malloc((size_t)r.nbytes);
+    if (!buf || k3_expert_load(&s, &r, buf) != r.nbytes) { free(buf); k3_st_close(&s); return -1; }
+    why[0] = 0;
+    *n255 = (long long)k3_expert_nan_scales(&s, &r, buf, why, cap);
+    free(buf);
+
+    K3Cfg c; memset(&c, 0, sizeof c);
+    c.n_layers = 1; c.n_experts = 1; c.topk = 1;
+    *serial = *batch = -99;
+    for (int pass = 0; pass < 2; pass++) {
+        K3Cache cache;
+        int inited = 0;
+        /* Slots are rounded up to the O_DIRECT window, so ask rather than compute. */
+        for (int64_t budget = 16 * 1024; budget <= (int64_t)64 << 20; budget *= 2)
+            if (k3_cache_init(&cache, &s, &c, budget) == 0) { inited = 1; break; }
+        if (!inited) { k3_st_close(&s); return -1; }
+        K3ExpertQ q;
+        if (pass == 0) {
+            const int one = 0;
+            /* K3_NOPREFETCH leaves getmany NULL; then this pass is the serial one too. */
+            if (cache.src.getmany) cache.src.getmany(&cache.src, 0, &one, 1);
+            *batch = cache.src.get(&cache.src, 0, 0, &q);
+        } else {
+            *serial = cache.src.get(&cache.src, 0, 0, &q);
+        }
+        k3_cache_free(&cache);
+    }
+    k3_st_close(&s);
+    return 0;
 }
 
 int main(int argc, char **argv)
@@ -472,6 +566,32 @@ int main(int argc, char **argv)
            && strstr(why, "model-00003-of-000003.safetensors") != NULL,
            "5+6 digit names: the missing files are named as they exist", why);
         if (ok) k3_st_close(&s);
+    }
+
+    /* E8M0 scale byte 255 is the NaN code; no quantiser writes it. A shard with one
+     * such byte has intact structure and reads back full, so it is the loader, not the
+     * reader, that must refuse it, naming the file, the tensor and the count. The clean
+     * twin must load through both cache paths, or this case proves nothing. */
+    {
+        char d[1024], why[1024] = "";
+        long long n = -1; int serial = -99, batch = -99;
+        snprintf(d, sizeof d, "%s/e8m0_clean", work);
+        int ok = write_expert_shard(d, -1) == 0
+              && probe_expert_shard(d, &n, why, sizeof why, &serial, &batch) == 0;
+        ck(ok && n == 0 && why[0] == 0 && serial == 0 && batch == 0,
+           "clean E8M0 scales load through the cache",
+           ok ? "" : "harness");
+
+        /* w1.weight_scale is bytes [128,136) of the data region; poison byte 3 of it. */
+        snprintf(d, sizeof d, "%s/e8m0_nan", work);
+        ok = write_expert_shard(d, EXP_P_BYTES + 3) == 0
+          && probe_expert_shard(d, &n, why, sizeof why, &serial, &batch) == 0;
+        ck(ok && n == 1
+           && strstr(why, "model-00001-of-00001.safetensors") != NULL
+           && strstr(why, "experts.0.w1.weight_scale") != NULL
+           && strstr(why, " 1 of 8 ") != NULL
+           && serial != 0 && batch != 0,
+           "one 255 scale byte refused by file/tensor/count", why);
     }
 
     printf("\n%s\n", g_fail ? "ST-FAULT TESTS FAILED" : "ST-FAULT TESTS PASSED");
