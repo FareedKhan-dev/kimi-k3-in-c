@@ -519,8 +519,13 @@ $(BIN)/test_real_layer: tests/unit/test_real_layer.c $(ENGINE_OBJ) | $(BIN)
 	$(CC) $(CFLAGS) $(INCLUDES) $(filter %.c %.o,$^) -o $@ $(LDFLAGS)
 
 ## tok: tokenizer parity against the reference implementation
+# `make tok TOK_FILES=...` is the documented form, and tools/tok.py reads K3_TOK_FILES,
+# so the value has to be handed across or it is silently ignored for the default search.
+# Only an EXPLICIT TOK_FILES is passed: the makefile's $(HOME)/k3model default would
+# otherwise override the in-repository location tools/tok.py looks in first.
+TOK_PARITY_ENV = $(if $(filter command line environment,$(origin TOK_FILES)),K3_TOK_FILES="$(TOK_FILES)")
 tok: $(BIN)/test_tok
-	@$(PYTHON) tools/tok_parity.py ./$(BIN)/test_tok
+	@$(TOK_PARITY_ENV) $(PYTHON) tools/tok_parity.py ./$(BIN)/test_tok
 
 ## cfg: config reader against both supported config layouts
 cfg: $(BIN)/test_cfg
