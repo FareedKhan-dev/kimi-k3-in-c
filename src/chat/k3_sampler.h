@@ -16,6 +16,8 @@ typedef struct {
 void k3_sampler_init(K3Sampler *s, double temperature, double top_p, int top_k,
                      uint64_t seed, uint64_t turn);
 void k3_sampler_free(K3Sampler *s);
+/* Return -1 without changing token_out or RNG on invalid configuration/logits.
+ * Negative infinity masks a token; at least one finite logit is required. */
 int  k3_sampler_next(K3Sampler *s, const float *logits, int n_vocab,
                      int greedy, int *token_out);
 

@@ -61,9 +61,17 @@ static int cmp_desc_global(const void *aa, const void *bb) { return cmp_desc(aa,
 
 int k3_sampler_next(K3Sampler *s, const float *logits, int n, int greedy, int *out)
 {
-    if (!logits || !out || n <= 0 || !(s->temperature > 0.0) || !(s->top_p > 0.0) || s->top_p > 1.0) return -1;
+    if (!s || !logits || !out || n <= 0 || !(s->temperature > 0.0) ||
+        !isfinite(s->temperature) || !(s->top_p > 0.0) || s->top_p > 1.0)
+        return -1;
     int best = 0;
-    for (int i = 1; i < n; i++) if (logits[i] > logits[best]) best = i;
+    for (int i = 0; i < n; i++) {
+        /* -INFINITY is a deliberate mask; NaN/+INFINITY mean the model's
+         * numeric output is invalid and must not silently select a token. */
+        if (isnan(logits[i]) || logits[i] == INFINITY) return -1;
+        if (logits[i] > logits[best]) best = i;
+    }
+    if (!isfinite(logits[best])) return -1;
     if (greedy) { *out = best; return 0; }
     if (n > s->cap) {
         int *ids = (int *)malloc((size_t)n * sizeof(*ids));
@@ -74,7 +82,15 @@ int k3_sampler_next(K3Sampler *s, const float *logits, int n, int greedy, int *o
     }
     const double max = logits[best] / s->temperature;
     double sum = 0.0;
-    for (int i = 0; i < n; i++) { s->ids[i] = i; s->prob[i] = exp((double)logits[i] / s->temperature - max); sum += s->prob[i]; }
+    for (int i = 0; i < n; i++) {
+        s->ids[i] = i;
+        /* Preserve normal seeded streams, but avoid inf-inf when a finite
+         * logit divided by a tiny positive temperature overflows. */
+        double scaled = isfinite(max) ? (double)logits[i] / s->temperature - max :
+                        ((double)logits[i] - logits[best]) / s->temperature;
+        s->prob[i] = exp(scaled);
+        sum += s->prob[i];
+    }
     if (!(sum > 0.0) || !isfinite(sum)) { *out = best; return 0; }
     for (int i = 0; i < n; i++) s->prob[i] /= sum;
     sort_prob = s->prob; qsort(s->ids, (size_t)n, sizeof(*s->ids), cmp_desc_global); sort_prob = NULL;
