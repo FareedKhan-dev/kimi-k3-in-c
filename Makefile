@@ -358,6 +358,10 @@ test: $(CLI_BIN) $(TEST_BINS)
 	  if command -v $(PYTHON) >/dev/null 2>&1; then \
 	      $(PYTHON) tests/unit/test_benchmark_receipts.py; \
 	  else echo "  NOT RUN: no $(PYTHON) on PATH"; fi
+	@echo "== conformance layer interval =="; \
+	  if command -v $(PYTHON) >/dev/null 2>&1; then \
+	      $(PYTHON) tests/unit/test_conform_range.py; \
+	  else echo "  NOT RUN: no $(PYTHON) on PATH"; fi
 	@echo "== partial download contract =="; \
 	  if ! command -v $(PYTHON) >/dev/null 2>&1; then \
 	      echo "  NOT RUN: no $(PYTHON) on PATH. tools/layers_to_shards.py backs"; \
