@@ -39,14 +39,20 @@ def aligned_buf(n: int):
 
 
 def measure(path: str, qd: int) -> float:
+    if qd < 1:
+        raise ValueError("queue depth must be positive")
+    if getattr(os, "O_DIRECT", None) is None or not callable(getattr(os, "preadv", None)):
+        raise RuntimeError("O_DIRECT and preadv are required; use Linux for this benchmark")
     fsz = os.path.getsize(path)
-    span = max(1, (fsz - SZ) // ALIGN)
+    if fsz < SZ:
+        raise ValueError("file is smaller than one expert-sized read")
+    span = (fsz - SZ) // ALIGN + 1
     offs = [random.randrange(0, span) * ALIGN for _ in range(N)]
     err = []
 
     def worker(k: int):
         try:
-            fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECT", 0))
+            fd = os.open(path, os.O_RDONLY | os.O_DIRECT)
         except OSError as e:
             err.append(e); return
         try:
@@ -57,20 +63,20 @@ def measure(path: str, qd: int) -> float:
                 while got < want:
                     r = os.preadv(fd, [mv[got:want]], offs[i] + got)
                     if r <= 0:
-                        break
+                        raise OSError("short read: expected %d bytes, got %d" % (want, got))
                     got += r
         except Exception as e:
             err.append(e)
         finally:
             os.close(fd)
 
-    t0 = time.time()
+    t0 = time.perf_counter()
     th = [threading.Thread(target=worker, args=(k,)) for k in range(qd)]
     for x in th:
         x.start()
     for x in th:
         x.join()
-    dt = time.time() - t0
+    dt = time.perf_counter() - t0
     if err:
         raise err[0]
     return N * SZ / dt / 1e6
@@ -81,14 +87,16 @@ def main():
         print(__doc__)
         return 2
     print("expert-sized (%d B) random O_DIRECT reads, %d per measurement\n" % (SZ, N))
+    failed = False
     for path in sys.argv[1:]:
         for qd in (1, 4, 16):
             try:
                 print("  %-46s QD%-3d %7.0f MB/s" % (path, qd, measure(path, qd)))
             except Exception as e:
+                failed = True
                 print("  %-46s QD%-3d FAILED: %s" % (path, qd, e))
         print()
-    return 0
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

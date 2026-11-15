@@ -314,6 +314,10 @@ test: $(CLI_BIN) $(TEST_BINS)
 	            echo "$$out" | tail -3; exit 1;; \
 	     esac; echo "  a 32769-id prompt refused, not truncated to 32768";; \
 	  esac
+	@echo "== device benchmark integrity =="; \
+	  if command -v $(PYTHON) >/dev/null 2>&1; then \
+	      $(PYTHON) tests/unit/test_devbw.py; \
+	  else echo "  NOT RUN: no $(PYTHON) on PATH"; fi
 	@echo "== partial download contract =="; \
 	  if ! command -v $(PYTHON) >/dev/null 2>&1; then \
 	      echo "  NOT RUN: no $(PYTHON) on PATH. tools/layers_to_shards.py backs"; \
