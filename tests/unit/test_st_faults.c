@@ -199,14 +199,17 @@ static int open_synthetic(const char *work, const char *sub, const char *header_
     return rc;
 }
 
-/* A one-expert shard in the real six-tensor layout, tiny: [2][64] packed and [2][4]
- * scales per matrix. Data bytes cycle mod 251, so 255 never occurs by accident; when
- * nan_at >= 0 that one byte is overwritten with 255. */
-#define EXP_ROWS 2
-#define EXP_PCOLS 64
-#define EXP_SCOLS (EXP_PCOLS * 2 / 32)
-#define EXP_P_BYTES (EXP_ROWS * EXP_PCOLS)
-#define EXP_S_BYTES (EXP_ROWS * EXP_SCOLS)
+/* A one-expert shard in the real six-tensor layout, at a real geometry scaled down:
+ * w1 and w3 are [INTER][LATENT] and w2 is [LATENT][INTER], one E8M0 scale per 32
+ * logical columns. That is the shape the cache holds every expert to
+ * (k3_expert_check_shape), so an expert of any other shape is refused before its
+ * scales are ever scanned, and this case would prove nothing about the scan. Data
+ * bytes cycle mod 251, so 255 never occurs by accident; when nan_at >= 0 that one byte
+ * is overwritten with 255. */
+#define EXP_LATENT 64
+#define EXP_INTER  32
+#define EXP_P_BYTES (EXP_INTER * EXP_LATENT / 2)   /* packed bytes per matrix: 1024 */
+#define EXP_S_BYTES (EXP_INTER * EXP_LATENT / 32)  /* scale bytes per matrix:    64 */
 #define EXP_BYTES (3 * (EXP_P_BYTES + EXP_S_BYTES))
 #define EXP_FMT "language_model.model.layers.0.block_sparse_moe.experts.0.%s.%s"
 
@@ -218,16 +221,19 @@ static int write_expert_shard(const char *dir, int nan_at)
     int64_t off = 0;
     h += (size_t)snprintf(hdr + h, sizeof hdr - h, "{");
     for (int i = 0; i < 3; i++) {
+        /* w2 is the transpose shape; its byte counts equal w1's at these dimensions */
+        const int rows = (i == 1) ? EXP_LATENT : EXP_INTER;
+        const int cols = (i == 1) ? EXP_INTER : EXP_LATENT;
         h += (size_t)snprintf(hdr + h, sizeof hdr - h,
                  "\"" EXP_FMT "\":{\"dtype\":\"U8\",\"shape\":[%d,%d],"
                  "\"data_offsets\":[%lld,%lld]},",
-                 W[i], "weight_packed", EXP_ROWS, EXP_PCOLS,
+                 W[i], "weight_packed", rows, cols / 2,
                  (long long)off, (long long)(off + EXP_P_BYTES));
         off += EXP_P_BYTES;
         h += (size_t)snprintf(hdr + h, sizeof hdr - h,
                  "\"" EXP_FMT "\":{\"dtype\":\"U8\",\"shape\":[%d,%d],"
                  "\"data_offsets\":[%lld,%lld]}%s",
-                 W[i], "weight_scale", EXP_ROWS, EXP_SCOLS,
+                 W[i], "weight_scale", rows, cols / 32,
                  (long long)off, (long long)(off + EXP_S_BYTES), i < 2 ? "," : "}");
         off += EXP_S_BYTES;
     }
@@ -264,6 +270,7 @@ static int probe_expert_shard(const char *dir, long long *n255, char *why, size_
 
     K3Cfg c; memset(&c, 0, sizeof c);
     c.n_layers = 1; c.n_experts = 1; c.topk = 1;
+    c.latent = EXP_LATENT; c.moe_inter = EXP_INTER;
     *serial = *batch = -99;
     for (int pass = 0; pass < 2; pass++) {
         K3Cache cache;
@@ -582,14 +589,14 @@ int main(int argc, char **argv)
            "clean E8M0 scales load through the cache",
            ok ? "" : "harness");
 
-        /* w1.weight_scale is bytes [128,136) of the data region; poison byte 3 of it. */
+        /* w1.weight_scale is bytes [1024,1088) of the data region; poison byte 3 of it. */
         snprintf(d, sizeof d, "%s/e8m0_nan", work);
         ok = write_expert_shard(d, EXP_P_BYTES + 3) == 0
           && probe_expert_shard(d, &n, why, sizeof why, &serial, &batch) == 0;
         ck(ok && n == 1
            && strstr(why, "model-00001-of-00001.safetensors") != NULL
            && strstr(why, "experts.0.w1.weight_scale") != NULL
-           && strstr(why, " 1 of 8 ") != NULL
+           && strstr(why, " 1 of 64 ") != NULL
            && serial != 0 && batch != 0,
            "one 255 scale byte refused by file/tensor/count", why);
     }
