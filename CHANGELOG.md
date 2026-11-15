@@ -12,11 +12,15 @@ outside contributors, makes everything that loads, parses, measures or certifies
 wrong input instead of quietly using it. Output is unchanged wherever it was already
 defined: every oracle gate still matches the reference exactly, at any thread count.
 
-Checked on the released checkpoint before tagging, on a 28-core AMD EPYC 9554: the first
-eight layers, both MLA layers among them, give byte-identical logits and the same tokens
-on 1.1.0 and 2.0.0 for a 613-token prompt, with no expert drops; real layers 1 (KDA) and 3
-(MLA) match the PyTorch reference at float32 rounding, about 1e-7 relative error against a
-5e-4 budget; and `make test` passes there on Linux with the released tokenizer present.
+Checked on the released checkpoint before tagging, on a 28-core AMD EPYC 9554. The full
+93-layer golden run (`tests/fixtures/golden`, prompt ids 3,4,5,6,7) gives logits that are
+byte-identical on 1.1.0 and 2.0.0, and byte-identical to the `c_logits.bin` the original
+campaign recorded; it emits token 2494 and agrees with the PyTorch reference to 5.2e-7
+relative error against a 5.1e-4 budget, top-10 overlap 10/10. The first eight layers, both
+MLA layers among them, give byte-identical logits and the same tokens on both versions for a
+613-token prompt, with no expert drops. Real layers 1 (KDA) and 3 (MLA) match the reference
+at float32 rounding, and `make test` passes there with the released tokenizer present,
+tokenizer parity 45/45.
 
 Compatibility notes, which are why this is a major version:
 
