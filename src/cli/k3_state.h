@@ -28,10 +28,11 @@
 #include "k3.h"
 
 #define K3_STATE_MAGIC "K3ST"
-/* Version 2 adds payload_hash. A version 1 file is refused rather than read with a
- * guessed layout; state files are session artifacts, written and read by the same
- * binary within one conversation, not a long-lived format. */
-#define K3_STATE_VER   2
+/* Version 2 adds payload_hash. Version 3 folds the header into it. An older file is
+ * refused rather than read with a guessed layout; state files are session artifacts,
+ * written and read by the same binary within one conversation, not a long-lived
+ * format. */
+#define K3_STATE_VER   3
 
 typedef struct {
     char    magic[4];
@@ -40,9 +41,11 @@ typedef struct {
     int32_t n_bound, n_mla, cached, nseq;
     int64_t kper;          /* KDA+conv floats per layer */
     int64_t kvpp, ropepp;  /* KV / rope floats per position, per MLA layer */
-    /* k3_state_hash over the payload bytes in file order: seq, ks, then the KV and
-     * rope slices. Checked on load; a file whose every fread comes back full can still
-     * hold a damaged matrix, and this is the only check that sees it. */
+    /* k3_state_hash over this header with payload_hash zeroed, then the payload bytes
+     * in file order: seq, ks, then the KV and rope slices. Checked on load; a file
+     * whose every fread comes back full can still hold a damaged matrix, or a header
+     * whose counts move the same bytes to different places, and this is the only check
+     * that sees either. */
     uint64_t payload_hash;
 } K3StateHdr;
 
@@ -50,6 +53,11 @@ typedef struct {
 uint64_t k3_state_hash(uint64_t h, const void *p, size_t n);
 
 void k3_state_fp(const K3Cfg *c, int32_t *fp);
+
+/* The per-layer state geometry this config implies: KDA+conv floats per bound layer,
+ * and KV / rope floats per position per MLA layer. The one definition the engine sizes
+ * its buffers from and the loader checks a header against. */
+void k3_state_geom(const K3Cfg *c, int64_t *kper, int64_t *kvpp, int64_t *ropepp);
 
 /* Reads only the header, so the caller can size buffers before committing to a load.
  * Returns 0, or -1 after printing why the file was refused. */

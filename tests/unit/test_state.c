@@ -60,8 +60,9 @@ static int spit(const char *path, const unsigned char *b, size_t n)
 }
 
 /* Small but not degenerate: two MLA layers, four bound layers, a KV cache with more
- * capacity than positions in use, so the position-major slicing is exercised. */
-enum { N_BOUND = 4, N_MLA = 2, KV_CAP = 16, CACHED = 5, NSEQ = 6, KPER = 100 };
+ * capacity than positions in use, so the position-major slicing is exercised. KPER is
+ * what cfg_fill's KDA geometry implies (16*8 + 3*16*3); the loader checks it. */
+enum { N_BOUND = 4, N_MLA = 2, KV_CAP = 16, CACHED = 5, NSEQ = 6, KPER = 272 };
 
 static void cfg_fill(K3Cfg *c)
 {
@@ -208,6 +209,46 @@ int main(int argc, char **argv)
                          N_BOUND + 1, N_MLA, KV_CAP) != 0, "other layer count refused", NULL);
         ck(k3_state_load(good, &c, &hd, dst.seq, dst.ks, dst.kvc, dst.ropec,
                          N_BOUND, N_MLA, CACHED - 1) != 0, "cache too small refused", NULL);
+        arrays_free(&dst);
+    }
+    printf("state file: header geometry\n");
+    {
+        /* The reads are sized and strided by these fields into buffers the caller sized
+         * from its config, so each is refused before any read. Before that check, a kper
+         * one too large overran ks, and the shifted pair below loaded cleanly: the bytes
+         * read are the same, so the payload hash matched, and KV rows landed in the rope
+         * cache. */
+        int64_t kper, kvpp, ropepp;
+        k3_state_geom(&c, &kper, &kvpp, &ropepp);
+        ck(kper == KPER && kvpp == src.kvpp && ropepp == src.ropepp,
+           "geometry helper matches the arrays", NULL);
+        unsigned char *m = (unsigned char *)malloc(n);
+        Arrays dst; arrays_alloc(&dst, KV_CAP, &c);
+        K3StateHdr *h = (K3StateHdr *)m;
+        memcpy(m, img, n); h->kper += 1; spit(mut, m, n);
+        ck(load(mut, &c, &dst) != 0, "kper larger than the config refused", NULL);
+        memcpy(m, img, n); h->kvpp += 4; h->ropepp -= 4; spit(mut, m, n);
+        ck(load(mut, &c, &dst) != 0, "KV/rope stride shifted refused", NULL);
+        memcpy(m, img, n); h->nseq = -1; spit(mut, m, n);
+        ck(load(mut, &c, &dst) != 0, "negative token count refused", NULL);
+        memcpy(m, img, n); h->cached = NSEQ + 1; spit(mut, m, n);
+        ck(load(mut, &c, &dst) != 0, "more cached positions than ids refused", NULL);
+        /* Same byte count, every check above satisfied: one position moved from the KV
+         * cache into the token ids. Only the header being inside the hash sees this. */
+        memcpy(m, img, n);
+        h->cached -= 1; h->nseq += (int32_t)((src.kvpp + src.ropepp) * N_MLA);
+        spit(mut, m, n);
+        Arrays big; memset(&big, 0, sizeof big);
+        int *seq = (int *)calloc((size_t)h->nseq, sizeof(int));
+        arrays_alloc(&big, KV_CAP, &c);
+        ck(seq && k3_state_load(mut, &c, h, seq, big.ks, big.kvc, big.ropec,
+                                N_BOUND, N_MLA, KV_CAP) != 0,
+           "counts moving the same bytes refused", NULL);
+        free(seq); arrays_free(&big);
+        unsigned char *t = (unsigned char *)malloc(n + 1);
+        memcpy(t, img, n); t[n] = 0; spit(mut, t, n + 1);
+        ck(load(mut, &c, &dst) != 0, "trailing bytes refused", NULL);
+        free(t); free(m);
         arrays_free(&dst);
     }
     printf("state file: payload integrity\n");
