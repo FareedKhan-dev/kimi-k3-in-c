@@ -5,6 +5,15 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The README matches 2.0.0 again.** The exit code 3 row covers every output file, the
+  chat paragraph documents `--top-k`, and trunk pinning is described as largest first.
+  Eight code excerpts that had fallen behind the source match it again: the aligned
+  safetensors read, the KDA step, MLA attention, both memory admission checks, trunk
+  pinning, the forward pass and the trunk layer read. Part II now says its excerpts are
+  condensed, and the MLA excerpt names the function it comes from.
+
 ## [2.0.0] - 2026-11-15
 
 Long prompts stop being a one-core job, and a large round of fixes, most of them from
