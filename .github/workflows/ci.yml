@@ -15,6 +15,30 @@ permissions:
   contents: read
 
 jobs:
+  # Reproduce the clean-clone proof with the test process in a container whose
+  # network namespace is disabled. Pull the compiler image before the timer;
+  # the timed command itself can neither fetch weights nor reach a service.
+  test-offline:
+    name: test-offline (no checkpoint, no network)
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Pull compiler image before the offline run
+        run: docker pull gcc:14
+
+      - name: Build and test with networking disabled
+        run: |
+          started=$(date +%s)
+          timeout 90s docker run --rm --network none \
+            --user "$(id -u):$(id -g)" \
+            -v "$GITHUB_WORKSPACE:/src" -w /src \
+            gcc:14 sh -c 'make -j"$(nproc)" && make test -j"$(nproc)"'
+          elapsed=$(( $(date +%s) - started ))
+          test "$elapsed" -lt 90
+          echo "offline test suite passed (${elapsed}s)"
+
   # Every test in this job runs WITHOUT model weights. That is deliberate: the checkpoint
   # is 1.56 TB, so correctness has to be verifiable without it or it will not be verified.
   build-and-test:
