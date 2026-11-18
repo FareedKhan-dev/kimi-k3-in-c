@@ -1,0 +1,173 @@
+KIMI K3 VERIFICATION REPORT
+Verification date: 2026-11-18
+
+Scope
+-----
+Build and test the C engine without model weights, then run the previously
+skipped tokenizer and chat checks using the official released tokenizer files.
+These checks do not establish correctness or performance on the full 2.78T
+checkpoint. The full-model oracle uses the repository's small 13-layer fixture.
+
+Environment
+-----------
+Host: Windows, PowerShell 5.1
+Execution: Ubuntu through WSL
+GNU Make: 4.4.1
+GCC: 15.2.0
+Built CLI: k3 2.0.0 (Linux executable; run through WSL)
+Python reference library: tiktoken==0.13.0 in an isolated WSL virtual environment
+
+Build tool selection and filesystem workaround
+---------------------------------------------
+The original PowerShell command, make test, failed because Make was not on the
+Windows PATH. Ubuntu WSL already supplied GNU Make, GCC, and Python, so no native
+Windows compiler or Make installation was required.
+
+An initial WSL test run compiled successfully but failed the state-file
+publication permissions assertion on the Windows-mounted filesystem:
+  observed mode 0777; expected 0644 with umask 0022.
+
+Placing BUILD on WSL's Linux filesystem resolved that failure.
+From the repository root in PowerShell:
+
+  wsl -d Ubuntu -- make -j2 test BUILD=/tmp/kimi-k3-build
+
+This keeps objects and generated test fixtures in Linux storage. Executables
+remain under the repository's bin/ directory.
+
+Weightless test results
+----------------------
+The supplied final run ended with:
+  VERDICT: ENGINE MATCHES THE REFERENCE EXACTLY
+  ALL WEIGHTLESS TESTS PASSED
+
+The command interface recorded the exit code as unknown; the completion verdict
+above comes from the actual test output, not an inferred numeric exit status.
+
+Highlights:
+  - Operator kernels: 22 passed, 0 failed, 0 skipped.
+  - Streaming cache, including split reads: passed.
+  - Safetensors reader self-checks and malformed-shard refusal tests: passed.
+  - Model streaming, JSON refusal, and output-close checks: passed.
+  - State-file roundtrip, integrity, geometry, and publication checks: passed.
+  - Configuration reader and invalid-config refusals: passed.
+  - Interrupt handling, system memory, and cgroup admission checks: passed.
+  - Tokenizer loader, sampler, and chat-prefix checks: passed.
+  - Full-width synthetic KDA scale test and trunk streaming checks: passed.
+  - CLI argument contracts and executed Python tooling checks: passed.
+
+Fixture oracle:
+  - Teacher forcing: 32/32 predicted positions matched.
+  - Teacher-forced generated span: 20/20 tokens matched.
+  - State reuse: all logits bit-identical.
+  - Greedy decode: 20/20 generated tokens matched.
+  - Incremental decode: 20/20 generated tokens matched.
+  - Prefix reuse: 22 reused + 10 new positions matched a full 32-token prefill
+    bit-for-bit for logits, KV cache, and KDA state.
+
+Skips in the weightless run:
+  - Synthetic trace equivalence: 1 Python test.
+  - Synthetic CLI output failures: 2 Python tests.
+  - Logit comparator evidence: 4 Python tests.
+  - Quantization grouping: 3 Python tests.
+  - Cache replay input integrity: 2 Python tests.
+  - Quantization source ownership: 2 Python tests.
+  - State-file "save with no room to stage" check: the directory remained
+    writable while running as root.
+  - Released-tokenizer roundtrip and chat-template checks: tokenizer files were
+    absent at the default /root/k3model location. These checks were subsequently
+    run explicitly and passed, as recorded below.
+
+The reasons for the 14 skipped Python tests were not printed in the supplied
+output. They were not investigated or rerun as part of tokenizer verification.
+
+Official tokenizer assets and dependencies
+------------------------------------------
+Source: https://huggingface.co/moonshotai/Kimi-K3
+Pinned revision: f831ab66814297da540d832a5235f8e904f29d06
+Download URL pattern:
+  https://huggingface.co/moonshotai/Kimi-K3/resolve/<revision>/<filename>
+
+Only the following assets were downloaded; no model weights were fetched:
+  tiktoken.model         2,795,286 bytes
+  tokenizer_config.json      3,478 bytes
+  tokenization_kimi.py       16,145 bytes
+  encoding_k3.py             26,304 bytes
+
+SHA-256:
+  tiktoken.model
+    b6c497a7469b33ced9c38afb1ad6e47f03f5e5dc05f15930799210ec050c5103
+  tokenizer_config.json
+    5d0803c94db9cd78763499e0956c95fd5a225c14a727e5a6cf5db3f96f010a6e
+  tokenization_kimi.py
+    f28ea66e2d862a2a5814970b2ce40c2f7d8296ff09aed90a7e7def689b906944
+  encoding_k3.py
+    49ff03305fdc4be26867972788d36150b67f8a9e852e62bb7959d87482223676
+
+WSL asset directory:
+  /root/.cache/kimi-k3-tokenizer/f831ab66814297da540d832a5235f8e904f29d06
+WSL virtual environment:
+  /root/.cache/kimi-k3-tokenizer-venv
+
+Ubuntu's python3.14-venv package was installed to supply missing ensurepip
+support. Apt also upgraded its required Python 3.14 runtime packages.
+tiktoken==0.13.0 and its dependencies were installed only in the virtual
+environment, not in system Python.
+
+Tokenizer verification commands
+-------------------------------
+The following Bash commands were executed through Ubuntu WSL, from the
+repository root. Use wsl -d Ubuntu from PowerShell to enter that environment.
+
+  export K3_TOK_FILES=/root/.cache/kimi-k3-tokenizer/f831ab66814297da540d832a5235f8e904f29d06
+  /root/.cache/kimi-k3-tokenizer-venv/bin/python tools/tok_parity.py ./bin/test_tok --verbose
+  ./bin/test_tok "$K3_TOK_FILES" roundtrip README.md
+  ./bin/test_chat "$K3_TOK_FILES"
+
+The reference comparison reads the official split pattern from
+tokenization_kimi.py using AST parsing and compares the C tokenizer with
+tiktoken using the same released vocabulary.
+
+Tokenizer verification results
+------------------------------
+Reference parity:
+  45/45 cases matched token-for-token; exit status 0.
+  Cases cover ASCII, whitespace, CRLF, digits, punctuation, contractions,
+  Han text, Japanese, Korean, Cyrillic, Arabic, Greek, accents, emoji and ZWJ,
+  source code, JSON, URLs, Windows paths, Markdown, and mixed scripts.
+
+Byte-exact roundtrip:
+  README.md: 163,956 bytes -> 46,680 token IDs -> 163,956 bytes.
+  Result: PASS; exit status 0.
+  Byte counts describe the README at verification time.
+
+Released-tokenizer chat suite:
+  CHAT TESTS PASSED; exit status 0.
+  Covered official control IDs, exact XTML bytes and token boundaries,
+  multi-turn reasoning preservation, thinking modes, literal control-marker
+  handling, completion parsing, and JSONL history persistence/refusals.
+
+Loaded vocabulary:
+  163,584 ranks plus 16 added tokens.
+
+No tests were skipped in these three explicit tokenizer/chat commands.
+These results establish parity for the exercised cases, not an exhaustive
+proof over every possible input.
+
+Final status and limits
+-----------------------
+The WSL build and weightless suite completed successfully with the skips listed
+above. All three explicit released-tokenizer checks passed with exit status 0.
+No engine source or build configuration changes were needed.
+Git status was clean after testing, before adding this report.
+
+Not performed:
+  - Full released-checkpoint inference or weight-dependent test-all checks.
+  - Native Windows/MSYS2 build.
+  - Sanitizer verification or performance benchmarking.
+  - External safetensors verification via tools/verify_st.py.
+  - Rerun of the unrelated skipped Python or root-sensitive permission checks.
+
+The tokenizer assets and virtual environment are cached outside the repository
+in WSL. The /tmp build directory is temporary and may need rebuilding after
+cleanup or restart.
